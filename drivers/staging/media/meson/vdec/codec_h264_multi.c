@@ -739,6 +739,28 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 				 H264_MULTI_WRRSP_DONE);
 		return IRQ_HANDLED;
 	}
+	if (status == H264_MULTI_SEI_DATA_READY) {
+		amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_SEI_DATA_DONE);
+		return IRQ_HANDLED;
+	}
+	if (status == H264_MULTI_DATA_REQUEST ||
+	    status == H264_MULTI_SEARCH_BUFEMPTY ||
+	    status == H264_MULTI_DECODE_BUFEMPTY ||
+	    status == H264_MULTI_AUX_DATA_READY) {
+		amvdec_m2m_job_yield(sess);
+		return IRQ_HANDLED;
+	}
+	if (status == H264_MULTI_DECODE_TIMEOUT ||
+	    status == H264_MULTI_DECODE_OVER_SIZE ||
+	    status == H264_MULTI_DECODE_ERROR_RESET ||
+	    status == H264_MULTI_DECODE_INIT_RESET) {
+		dev_err(sess->core->dev,
+			"fatal H.264 firmware status: %#x\n", status);
+		amvdec_abort(sess);
+		amvdec_m2m_job_yield(sess);
+		return IRQ_HANDLED;
+	}
 
 	if (status == H264_MULTI_CONFIG_REQUEST ||
 	    status == H264_MULTI_SLICE_HEAD_DONE ||
