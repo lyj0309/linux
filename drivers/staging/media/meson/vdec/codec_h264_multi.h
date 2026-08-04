@@ -5,6 +5,8 @@
 
 #include "vdec.h"
 
+#define H264_MULTI_MAX_POC_CYCLE	128
+
 enum h264_multi_event {
 	H264_MULTI_SLICE_HEAD_DONE = 0x01,
 	H264_MULTI_PIC_DATA_DONE = 0x02,
@@ -44,8 +46,17 @@ struct h264_multi_config {
 	u8 max_refs;
 	u8 num_reorder_frames;
 	u8 max_dec_frame_buffering;
+	u8 pic_order_cnt_type;
+	u8 num_ref_frames_in_poc_cycle;
+	u32 max_frame_num;
+	u32 max_pic_order_cnt_lsb;
+	s16 offset_for_non_ref_pic;
+	s16 offset_for_top_to_bottom_field;
+	s16 offset_for_ref_frame[H264_MULTI_MAX_POC_CYCLE];
 	bool frame_mbs_only;
 	bool bitstream_restriction;
+	bool delta_pic_order_always_zero;
+	bool frame_num_gap_allowed;
 };
 
 #define H264_MULTI_MAX_MMCO_OPS	43
