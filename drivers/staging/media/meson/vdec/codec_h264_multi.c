@@ -10,6 +10,7 @@
 #define H264_MULTI_PAGE_SIZE	SZ_4K
 #define H264_MULTI_FW_SIZE	(H264_MULTI_FW_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_SWAP_SIZE	(H264_MULTI_SWAP_PAGES * H264_MULTI_PAGE_SIZE)
+#define H264_MULTI_LMEM_WORDS	(PAGE_SIZE / sizeof(u16))
 
 enum h264_multi_fw_page {
 	H264_MULTI_FW_MAIN_0,
@@ -38,6 +39,7 @@ struct codec_h264_multi {
 	dma_addr_t fw_swap_paddr;
 	void *lmem_vaddr;
 	dma_addr_t lmem_paddr;
+	u16 lmem[H264_MULTI_LMEM_WORDS];
 };
 
 static void h264_multi_copy_page(void *dst, unsigned int dst_page,
@@ -123,4 +125,35 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 			  h264->fw_swap_vaddr, h264->fw_swap_paddr);
 	kfree(h264);
 	sess->priv = NULL;
+}
+
+int codec_h264_multi_read_lmem(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	const u16 *src;
+	unsigned int i;
+	unsigned int j;
+
+	if (!h264 || !h264->lmem_vaddr)
+		return -EINVAL;
+
+	src = h264->lmem_vaddr;
+	dma_rmb();
+	for (i = 0; i < H264_MULTI_LMEM_WORDS; i += 4) {
+		for (j = 0; j < 4; j++)
+			h264->lmem[i + j] = src[i + 3 - j];
+	}
+
+	return 0;
+}
+
+u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
+				       unsigned int index)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+
+	if (!h264 || index >= H264_MULTI_LMEM_WORDS)
+		return 0;
+
+	return h264->lmem[index];
 }
