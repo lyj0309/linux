@@ -375,9 +375,19 @@ void esparser_queue_all_src(struct work_struct *work)
 	struct vb2_v4l2_buffer *vbuf;
 	int ret;
 	bool finish = false;
+	bool queue_next = false;
 
 	if (!atomic_read(&sess->m2m_job_running))
 		return;
+
+	ret = amvdec_m2m_job_start(sess);
+	if (ret) {
+		dev_err(sess->core->dev,
+			"failed to acquire decoder hardware: %d\n", ret);
+		amvdec_abort(sess);
+		amvdec_m2m_job_finish(sess);
+		return;
+	}
 
 	mutex_lock(&sess->lock);
 	vbuf = v4l2_m2m_next_src_buf(sess->m2m_ctx);
@@ -387,11 +397,17 @@ void esparser_queue_all_src(struct work_struct *work)
 		ret = esparser_queue(sess, vbuf);
 		/* Only a full VIFIFO is retryable with the same source buffer. */
 		finish = ret != -EAGAIN;
+		if (!ret && sess->fmt_out->codec_ops->context_switching) {
+			finish = false;
+			queue_next = true;
+		}
 	}
 	mutex_unlock(&sess->lock);
 
 	if (finish)
 		amvdec_m2m_job_finish(sess);
+	else if (queue_next)
+		schedule_work(&sess->esparser_queue_work);
 }
 
 int esparser_power_up(struct amvdec_session *sess)

@@ -273,6 +273,9 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		h264->context_valid = true;
 	}
 
+	if (status == H264_MULTI_PIC_DATA_DONE)
+		amvdec_m2m_job_yield(sess);
+
 	return IRQ_HANDLED;
 }
 
