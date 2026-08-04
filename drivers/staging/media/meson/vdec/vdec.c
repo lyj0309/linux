@@ -200,11 +200,6 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		goto unlock;
 	}
 
-	if (sess->status == STATUS_NEEDS_RESUME && sess->changed_format) {
-		codec_ops->resume(sess);
-		sess->status = STATUS_RUNNING;
-	}
-
 unlock:
 	mutex_unlock(&core->hw_lock);
 	enable_irq(core->vdec_irq);
@@ -424,10 +419,8 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (sess->status == STATUS_NEEDS_RESUME &&
 	    q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    sess->changed_format) {
-		if (!codec_ops->context_switching) {
-			codec_ops->resume(sess);
-			sess->status = STATUS_RUNNING;
-		}
+		codec_ops->resume(sess);
+		sess->status = STATUS_RUNNING;
 		goto unlock_ok;
 	}
 
