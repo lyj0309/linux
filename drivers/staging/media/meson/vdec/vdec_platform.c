@@ -11,6 +11,7 @@
 #include "vdec_hevc.h"
 #include "codec_mpeg12.h"
 #include "codec_h264.h"
+#include "codec_h264_g12a.h"
 #include "codec_hevc.h"
 #include "codec_vp9.h"
 
@@ -170,8 +171,8 @@ static const struct amvdec_format vdec_formats_g12a[] = {
 		.max_width = 3840,
 		.max_height = 2160,
 		.vdec_ops = &vdec_1_ops,
-		.codec_ops = &codec_h264_ops,
-		.firmware_path = "meson/vdec/g12a_h264.bin",
+		.codec_ops = &codec_h264_g12a_ops,
+		.firmware_path = "meson/vdec/g12a_h264_multi.bin",
 		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED |
 			 V4L2_FMT_FLAG_DYN_RESOLUTION,
@@ -198,8 +199,8 @@ static const struct amvdec_format vdec_formats_sm1[] = {
 		.max_width = 3840,
 		.max_height = 2160,
 		.vdec_ops = &vdec_1_ops,
-		.codec_ops = &codec_h264_ops,
-		.firmware_path = "meson/vdec/g12a_h264.bin",
+		.codec_ops = &codec_h264_g12a_ops,
+		.firmware_path = "meson/vdec/g12a_h264_multi.bin",
 		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED |
 			 V4L2_FMT_FLAG_DYN_RESOLUTION,
@@ -242,7 +243,7 @@ const struct vdec_platform vdec_platform_sm1 = {
 	.revision = VDEC_REVISION_SM1,
 };
 
-MODULE_FIRMWARE("meson/vdec/g12a_h264.bin");
+MODULE_FIRMWARE("meson/vdec/g12a_h264_multi.bin");
 MODULE_FIRMWARE("meson/vdec/g12a_vp9.bin");
 MODULE_FIRMWARE("meson/vdec/gxbb_h264.bin");
 MODULE_FIRMWARE("meson/vdec/gxl_h264.bin");
