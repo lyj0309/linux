@@ -189,9 +189,17 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 	int i = 0;
 	int ret;
 
+	sess->canvas_reg_count = 0;
+
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
-		if (!reg_base[reg_base_cur])
-			return -EINVAL;
+		if (!reg_base[reg_base_cur]) {
+			ret = -EINVAL;
+			goto free_canvases;
+		}
+		if (sess->canvas_reg_count >= MAX_CANVAS_REGS) {
+			ret = -ENOSPC;
+			goto free_canvases;
+		}
 
 		reg_cur = reg_base[reg_base_cur] + reg_num_cur * 4;
 
@@ -200,18 +208,19 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 			ret = set_canvas_nv12m(sess, &buf->vb.vb2_buf, width,
 					       height, reg_cur);
 			if (ret)
-				return ret;
+				goto free_canvases;
 			break;
 		case V4L2_PIX_FMT_YUV420M:
 			ret = set_canvas_yuv420m(sess, &buf->vb.vb2_buf, width,
 						 height, reg_cur);
 			if (ret)
-				return ret;
+				goto free_canvases;
 			break;
 		default:
 			dev_err(sess->core->dev, "Unsupported pixfmt %08X\n",
 				pixfmt);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto free_canvases;
 		}
 
 		reg_num_cur++;
@@ -221,11 +230,41 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 		}
 
 		sess->fw_idx_to_vb2_idx[i++] = buf->vb.vb2_buf.index;
+		sess->canvas_regs[sess->canvas_reg_count] = reg_cur;
+		sess->canvas_values[sess->canvas_reg_count] =
+			amvdec_read_dos(sess->core, reg_cur);
+		sess->canvas_reg_count++;
 	}
 
 	return 0;
+
+free_canvases:
+	amvdec_free_canvases(sess);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(amvdec_set_canvases);
+
+void amvdec_free_canvases(struct amvdec_session *sess)
+{
+	unsigned int i;
+
+	for (i = 0; i < sess->canvas_num; i++)
+		meson_canvas_free(sess->core->canvas, sess->canvas_alloc[i]);
+
+	sess->canvas_num = 0;
+	sess->canvas_reg_count = 0;
+}
+EXPORT_SYMBOL_GPL(amvdec_free_canvases);
+
+void amvdec_restore_canvases(struct amvdec_session *sess)
+{
+	unsigned int i;
+
+	for (i = 0; i < sess->canvas_reg_count; i++)
+		amvdec_write_dos(sess->core, sess->canvas_regs[i],
+				 sess->canvas_values[i]);
+}
+EXPORT_SYMBOL_GPL(amvdec_restore_canvases);
 
 int amvdec_add_ts(struct amvdec_session *sess, u64 ts,
 		  struct v4l2_timecode tc, u32 offset, u32 vbuf_flags)

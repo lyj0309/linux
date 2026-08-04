@@ -20,6 +20,7 @@
 
 /* 32 buffers in 3-plane YUV420 */
 #define MAX_CANVAS (32 * 3)
+#define MAX_CANVAS_REGS 32
 
 struct amvdec_buffer {
 	struct list_head list;
@@ -235,6 +236,9 @@ enum amvdec_status {
  * @changed_format: the format changed
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
+ * @canvas_regs: DOS registers containing the session canvas mappings
+ * @canvas_values: values restored to the session canvas registers
+ * @canvas_reg_count: number of saved canvas registers
  * @vififo_vaddr: virtual address for the VIFIFO
  * @vififo_paddr: physical address for the VIFIFO
  * @vififo_size: size of the VIFIFO dma alloc
@@ -290,6 +294,9 @@ struct amvdec_session {
 
 	u8 canvas_alloc[MAX_CANVAS];
 	u32 canvas_num;
+	u32 canvas_regs[MAX_CANVAS_REGS];
+	u32 canvas_values[MAX_CANVAS_REGS];
+	u32 canvas_reg_count;
 
 	void *vififo_vaddr;
 	dma_addr_t vififo_paddr;
