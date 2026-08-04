@@ -193,6 +193,8 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 
 	if (!h264)
 		return;
+	if (h264->pic_state.vbuf)
+		v4l2_m2m_buf_done(h264->pic_state.vbuf, VB2_BUF_STATE_ERROR);
 
 	dma_free_coherent(core->dev, H264_MULTI_WORKSPACE_SIZE,
 			  h264->workspace_vaddr, h264->workspace_paddr);
@@ -663,8 +665,10 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		if (!ret)
 			ret = codec_h264_multi_configure_picture(sess, action);
 		if (ret) {
-			if (vbuf)
+			if (vbuf) {
+				h264_multi_dpb_picture_reset(&h264->pic_state);
 				v4l2_m2m_buf_queue(sess->m2m_ctx, vbuf);
+			}
 			dev_err(sess->core->dev,
 				"invalid H.264 picture state: %d\n", ret);
 			amvdec_abort(sess);
