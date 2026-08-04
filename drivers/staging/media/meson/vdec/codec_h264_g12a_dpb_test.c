@@ -2,7 +2,7 @@
 
 #include <kunit/test.h>
 
-#include "codec_h264_multi_dpb.h"
+#include "codec_h264_g12a_dpb.h"
 
 static struct h264_multi_config h264_multi_test_config(u8 poc_type)
 {
