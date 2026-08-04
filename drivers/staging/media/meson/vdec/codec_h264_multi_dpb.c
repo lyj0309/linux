@@ -511,6 +511,84 @@ commit:
 	return ret;
 }
 
+void h264_multi_dpb_picture_reset(struct h264_multi_dpb_picture *pic_state)
+{
+	memset(pic_state, 0, sizeof(*pic_state));
+}
+
+static bool
+h264_multi_same_picture(const struct h264_multi_picture *pic_state,
+			const struct h264_multi_picture *next)
+{
+	return pic_state->frame_num == next->frame_num &&
+		pic_state->nal_unit_type == next->nal_unit_type &&
+		!!pic_state->nal_ref_idc == !!next->nal_ref_idc &&
+		pic_state->field_pic == next->field_pic &&
+		pic_state->bottom_field == next->bottom_field &&
+		pic_state->pic_order_cnt_lsb == next->pic_order_cnt_lsb &&
+		pic_state->delta_pic_order_cnt_bottom ==
+			next->delta_pic_order_cnt_bottom &&
+		pic_state->delta_pic_order_cnt[0] == next->delta_pic_order_cnt[0] &&
+		pic_state->delta_pic_order_cnt[1] == next->delta_pic_order_cnt[1];
+}
+
+int h264_multi_dpb_picture_begin(struct h264_multi_dpb *dpb,
+				 const struct h264_multi_config *config,
+				 struct h264_multi_dpb_picture *pic_state,
+				 const struct h264_multi_picture *picture,
+				 u32 buffer_index,
+				 enum h264_multi_slice_action *action)
+{
+	int ret;
+
+	if (!dpb || !config || !pic_state || !picture || !action)
+		return -EINVAL;
+
+	if (!pic_state->active) {
+		if (picture->first_mb_in_slice)
+			return -EINVAL;
+
+		ret = h264_multi_dpb_begin(dpb, config, picture,
+					   &pic_state->poc);
+		if (ret)
+			return ret;
+
+		pic_state->picture = *picture;
+		pic_state->buffer_index = buffer_index;
+		pic_state->active = true;
+		*action = H264_MULTI_SLICE_NEW_PICTURE;
+		return 0;
+	}
+
+	if (!picture->first_mb_in_slice ||
+	    !h264_multi_same_picture(&pic_state->picture, picture))
+		return -EPIPE;
+
+	*action = H264_MULTI_SLICE_CONTINUE;
+	return 0;
+}
+
+int h264_multi_dpb_picture_finish(struct h264_multi_dpb *dpb,
+				  const struct h264_multi_config *config,
+				  struct h264_multi_dpb_picture *pic_state,
+				  const struct h264_multi_marking *marking,
+				  u64 reference_ts)
+{
+	int ret;
+
+	if (!dpb || !config || !pic_state || !marking)
+		return -EINVAL;
+	if (!pic_state->active)
+		return -EPIPE;
+
+	ret = h264_multi_dpb_finish(dpb, config, &pic_state->picture, marking,
+				    &pic_state->poc, reference_ts);
+	if (!ret)
+		h264_multi_dpb_picture_reset(pic_state);
+
+	return ret;
+}
+
 void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
 			    const struct h264_multi_config *config,
 			    const struct h264_multi_picture *picture,

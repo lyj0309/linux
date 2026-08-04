@@ -301,6 +301,75 @@ static void h264_multi_dpb_long_term_test(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, h264_multi_dpb_find_ts(dpb, 100), NULL);
 }
 
+static void h264_multi_dpb_multislice_picture_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture first = {
+		.nal_ref_idc = 1,
+		.frame_num = 3,
+	};
+	struct h264_multi_picture next = first;
+	struct h264_multi_dpb_picture pic_state;
+	struct h264_multi_marking marking = {};
+	struct h264_multi_dpb dpb;
+	enum h264_multi_slice_action action;
+	int ret;
+
+	config.max_refs = 2;
+	next.first_mb_in_slice = 120;
+	h264_multi_dpb_reset(&dpb);
+	h264_multi_dpb_picture_reset(&pic_state);
+
+	ret = h264_multi_dpb_picture_begin(&dpb, &config, &pic_state, &first, 7,
+					   &action);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, action, H264_MULTI_SLICE_NEW_PICTURE);
+	KUNIT_EXPECT_TRUE(test, pic_state.active);
+	KUNIT_EXPECT_EQ(test, pic_state.buffer_index, 7U);
+
+	ret = h264_multi_dpb_picture_begin(&dpb, &config, &pic_state, &next, 7,
+					   &action);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, action, H264_MULTI_SLICE_CONTINUE);
+	KUNIT_EXPECT_EQ(test, h264_multi_dpb_active_slots(&dpb), 0U);
+
+	ret = h264_multi_dpb_picture_finish(&dpb, &config, &pic_state, &marking,
+					    103);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_FALSE(test, pic_state.active);
+	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 103));
+}
+
+static void h264_multi_dpb_picture_sequence_error_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture first = {
+		.nal_ref_idc = 1,
+		.frame_num = 3,
+	};
+	struct h264_multi_picture broken = first;
+	struct h264_multi_dpb_picture pic_state;
+	struct h264_multi_dpb dpb;
+	enum h264_multi_slice_action action;
+	int ret;
+
+	broken.first_mb_in_slice = 20;
+	h264_multi_dpb_reset(&dpb);
+	h264_multi_dpb_picture_reset(&pic_state);
+	ret = h264_multi_dpb_picture_begin(&dpb, &config, &pic_state, &broken, 1,
+					   &action);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	ret = h264_multi_dpb_picture_begin(&dpb, &config, &pic_state, &first, 1,
+					   &action);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	broken.frame_num++;
+	ret = h264_multi_dpb_picture_begin(&dpb, &config, &pic_state, &broken, 2,
+					   &action);
+	KUNIT_EXPECT_EQ(test, ret, -EPIPE);
+	KUNIT_EXPECT_TRUE(test, pic_state.active);
+}
+
 static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_poc_type0_wrap_test),
 	KUNIT_CASE(h264_multi_poc_non_ref_commit_test),
@@ -312,6 +381,8 @@ static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_dpb_sliding_window_test),
 	KUNIT_CASE(h264_multi_dpb_mmco1_test),
 	KUNIT_CASE(h264_multi_dpb_long_term_test),
+	KUNIT_CASE(h264_multi_dpb_multislice_picture_test),
+	KUNIT_CASE(h264_multi_dpb_picture_sequence_error_test),
 	{}
 };
 
