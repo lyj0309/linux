@@ -116,12 +116,165 @@ static void h264_multi_poc_type2_frame_wrap_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, poc.bottom, 34);
 }
 
+static unsigned int h264_multi_dpb_active_slots(struct h264_multi_dpb *dpb)
+{
+	unsigned int active = 0;
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++)
+		active += dpb->slots[i].active;
+
+	return active;
+}
+
+static struct h264_multi_dpb_slot *
+h264_multi_dpb_find_ts(struct h264_multi_dpb *dpb, u64 reference_ts)
+{
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (dpb->slots[i].active &&
+		    dpb->slots[i].reference_ts == reference_ts)
+			return &dpb->slots[i];
+	}
+
+	return NULL;
+}
+
+static void h264_multi_dpb_decode_ref(struct kunit *test,
+				      struct h264_multi_dpb *dpb,
+				      const struct h264_multi_config *config,
+				      u16 frame_num, u64 reference_ts,
+				      const struct h264_multi_marking *marking)
+{
+	struct h264_multi_picture picture = {
+		.nal_ref_idc = 1,
+		.frame_num = frame_num,
+	};
+	struct h264_multi_poc poc;
+
+	KUNIT_ASSERT_EQ(test, h264_multi_dpb_begin(dpb, config, &picture,
+						    &poc), 0);
+	KUNIT_ASSERT_EQ(test, h264_multi_dpb_finish(dpb, config, &picture,
+						     marking, &poc,
+						     reference_ts), 0);
+}
+
+static void h264_multi_dpb_sliding_window_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_marking marking = {};
+	struct h264_multi_dpb dpb;
+
+	config.max_refs = 2;
+	h264_multi_dpb_reset(&dpb);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 0, 100, &marking);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 1, 101, &marking);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 2, 102, &marking);
+
+	KUNIT_EXPECT_EQ(test, h264_multi_dpb_active_slots(&dpb), 2U);
+	KUNIT_EXPECT_PTR_EQ(test, h264_multi_dpb_find_ts(&dpb, 100), NULL);
+	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 101));
+	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 102));
+}
+
+static void h264_multi_dpb_mmco1_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_marking sliding = {};
+	struct h264_multi_marking marking = {
+		.adaptive = true,
+		.count = 1,
+		.ops[0] = {
+			.opcode = 1,
+			.difference_of_pic_nums_minus1 = 0,
+		},
+	};
+	struct h264_multi_dpb dpb;
+
+	config.max_refs = 4;
+	h264_multi_dpb_reset(&dpb);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 0, 100, &sliding);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 1, 101, &sliding);
+	h264_multi_dpb_decode_ref(test, &dpb, &config, 2, 102, &marking);
+
+	KUNIT_EXPECT_EQ(test, h264_multi_dpb_active_slots(&dpb), 2U);
+	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 100));
+	KUNIT_EXPECT_PTR_EQ(test, h264_multi_dpb_find_ts(&dpb, 101), NULL);
+	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 102));
+}
+
+static void h264_multi_dpb_long_term_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_marking *sliding;
+	struct h264_multi_marking *convert;
+	struct h264_multi_marking *trim;
+	struct v4l2_h264_dpb_entry *entries;
+	struct h264_multi_picture current_pic = {
+		.frame_num = 2,
+	};
+	struct h264_multi_dpb_slot *slot;
+	struct h264_multi_dpb *dpb;
+	unsigned int i;
+
+	dpb = kunit_kzalloc(test, sizeof(*dpb), GFP_KERNEL);
+	entries = kunit_kcalloc(test, H264_MULTI_DPB_SIZE, sizeof(*entries),
+				GFP_KERNEL);
+	sliding = kunit_kzalloc(test, sizeof(*sliding), GFP_KERNEL);
+	convert = kunit_kzalloc(test, sizeof(*convert), GFP_KERNEL);
+	trim = kunit_kzalloc(test, sizeof(*trim), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dpb);
+	KUNIT_ASSERT_NOT_NULL(test, entries);
+	KUNIT_ASSERT_NOT_NULL(test, sliding);
+	KUNIT_ASSERT_NOT_NULL(test, convert);
+	KUNIT_ASSERT_NOT_NULL(test, trim);
+	convert->adaptive = true;
+	convert->count = 1;
+	convert->ops[0].opcode = 3;
+	convert->ops[0].long_term_frame_idx = 3;
+	trim->adaptive = true;
+	trim->count = 1;
+	trim->ops[0].opcode = 4;
+	trim->ops[0].max_long_term_frame_idx_plus1 = 3;
+
+	config.max_refs = 4;
+	h264_multi_dpb_reset(dpb);
+	h264_multi_dpb_decode_ref(test, dpb, &config, 0, 100, sliding);
+	h264_multi_dpb_decode_ref(test, dpb, &config, 1, 101, convert);
+	slot = h264_multi_dpb_find_ts(dpb, 100);
+	KUNIT_ASSERT_NOT_NULL(test, slot);
+	KUNIT_EXPECT_TRUE(test, slot->long_term);
+	KUNIT_EXPECT_EQ(test, slot->long_term_frame_idx, 3);
+
+	h264_multi_dpb_to_v4l2(dpb, &config, &current_pic, entries);
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (entries[i].reference_ts != 100)
+			continue;
+		KUNIT_EXPECT_EQ(test, entries[i].frame_num, 3);
+		KUNIT_EXPECT_TRUE(test, entries[i].flags &
+				  V4L2_H264_DPB_ENTRY_FLAG_VALID);
+		KUNIT_EXPECT_TRUE(test, entries[i].flags &
+				  V4L2_H264_DPB_ENTRY_FLAG_ACTIVE);
+		KUNIT_EXPECT_TRUE(test, entries[i].flags &
+				  V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM);
+		break;
+	}
+	KUNIT_EXPECT_LT(test, i, (unsigned int)H264_MULTI_DPB_SIZE);
+
+	h264_multi_dpb_decode_ref(test, dpb, &config, 2, 102, trim);
+	KUNIT_EXPECT_PTR_EQ(test, h264_multi_dpb_find_ts(dpb, 100), NULL);
+}
+
 static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_poc_type0_wrap_test),
 	KUNIT_CASE(h264_multi_poc_non_ref_commit_test),
 	KUNIT_CASE(h264_multi_poc_mmco5_test),
 	KUNIT_CASE(h264_multi_poc_type1_cycle_test),
 	KUNIT_CASE(h264_multi_poc_type2_frame_wrap_test),
+	KUNIT_CASE(h264_multi_dpb_sliding_window_test),
+	KUNIT_CASE(h264_multi_dpb_mmco1_test),
+	KUNIT_CASE(h264_multi_dpb_long_term_test),
 	{}
 };
 
