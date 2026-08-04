@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 #include <linux/dma-mapping.h>
+#include <linux/iopoll.h>
 #include <linux/log2.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 
 #include <media/v4l2-h264.h>
@@ -48,6 +50,11 @@
 #define H264_MULTI_DBKW_CANVAS_ADDR	0x26c4
 #define H264_MULTI_REC_CANVAS_ADDR	0x26c8
 #define H264_MULTI_CURR_CANVAS_CTRL	0x26cc
+#define H264_MULTI_CO_MB_WR_ADDR		0x30e0
+#define H264_MULTI_CO_MB_RD_ADDR		0x30e4
+#define H264_MULTI_CO_MB_RW_CTL		0x30f4
+
+#define H264_MULTI_CO_MB_SIZE		96
 
 #define H264_MULTI_DECODE_MODE_STREAM	2
 
@@ -80,6 +87,10 @@ struct codec_h264_multi {
 	dma_addr_t lmem_paddr;
 	void *workspace_vaddr;
 	dma_addr_t workspace_paddr;
+	void *mv_vaddr;
+	dma_addr_t mv_paddr;
+	size_t mv_size;
+	size_t mv_slot_size;
 	struct h264_multi_dpb dpb;
 	struct h264_multi_dpb_picture pic_state;
 	struct h264_multi_config config;
@@ -195,6 +206,9 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 		return;
 	if (h264->pic_state.vbuf)
 		v4l2_m2m_buf_done(h264->pic_state.vbuf, VB2_BUF_STATE_ERROR);
+	if (h264->mv_vaddr)
+		dma_free_coherent(core->dev, h264->mv_size,
+				  h264->mv_vaddr, h264->mv_paddr);
 
 	dma_free_coherent(core->dev, H264_MULTI_WORKSPACE_SIZE,
 			  h264->workspace_vaddr, h264->workspace_paddr);
@@ -335,6 +349,49 @@ static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
 	return IRQ_WAKE_THREAD;
 }
 
+static int
+codec_h264_multi_alloc_mv(struct amvdec_session *sess,
+			  const struct h264_multi_config *config,
+			  unsigned int capture_buf_count)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+	dma_addr_t paddr;
+	void *vaddr;
+	size_t slot_size;
+	size_t size;
+	u32 mb_height;
+	u32 mb_width;
+
+	mb_width = ALIGN(DIV_ROUND_UP(config->coded_width, 16), 4);
+	mb_height = ALIGN(DIV_ROUND_UP(config->coded_height, 16), 4);
+	if (check_mul_overflow((size_t)mb_width, (size_t)mb_height,
+			       &slot_size) ||
+	    check_mul_overflow(slot_size, (size_t)H264_MULTI_CO_MB_SIZE,
+			       &slot_size) ||
+	    check_mul_overflow(slot_size, (size_t)capture_buf_count, &size))
+		return -EOVERFLOW;
+	size = PAGE_ALIGN(size);
+	if (h264->mv_vaddr && h264->mv_size == size) {
+		h264->mv_slot_size = slot_size;
+		return 0;
+	}
+
+	vaddr = dma_alloc_coherent(core->dev, size, &paddr, GFP_KERNEL);
+	if (!vaddr)
+		return -ENOMEM;
+	memset(vaddr, 0, size);
+	if (h264->mv_vaddr)
+		dma_free_coherent(core->dev, h264->mv_size,
+				  h264->mv_vaddr, h264->mv_paddr);
+	h264->mv_vaddr = vaddr;
+	h264->mv_paddr = paddr;
+	h264->mv_size = size;
+	h264->mv_slot_size = slot_size;
+
+	return 0;
+}
+
 static int codec_h264_multi_configure(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
@@ -355,6 +412,9 @@ static int codec_h264_multi_configure(struct amvdec_session *sess)
 		return ret;
 
 	ret = h264_multi_dpb_buf_count(&config, &capture_buf_count);
+	if (ret)
+		return ret;
+	ret = codec_h264_multi_alloc_mv(sess, &config, capture_buf_count);
 	if (ret)
 		return ret;
 
@@ -474,6 +534,62 @@ static int codec_h264_multi_configure_references(struct amvdec_session *sess)
 	return codec_h264_multi_write_ref_list(sess, h264->ref_list1, l1_count);
 }
 
+static int codec_h264_multi_configure_mv(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct h264_multi_picture *picture = &h264->pic_state.picture;
+	struct amvdec_core *core = sess->core;
+	const struct h264_multi_dpb_slot *ref_slot;
+	dma_addr_t addr;
+	size_t offset;
+	size_t slot_size;
+	u16 mode_flags;
+	u32 value;
+	u8 ref_type;
+	bool compact;
+	int ret;
+
+	if (!h264->mv_vaddr)
+		return -EINVAL;
+	mode_flags = h264->lmem.data.params[H264_MULTI_PARAM_MODE_8X8_FLAGS];
+	compact = (mode_flags & BIT(2)) && (mode_flags & BIT(1));
+	slot_size = h264->mv_slot_size >> (compact ? 2 : 0);
+	if (check_mul_overflow((size_t)picture->first_mb_in_slice,
+			       (size_t)(H264_MULTI_CO_MB_SIZE >>
+					(compact ? 2 : 0)), &offset) ||
+	    offset >= slot_size)
+		return -ERANGE;
+
+	ret = read_poll_timeout(amvdec_read_dos, value, !(value & BIT(11)),
+				1, 1000, false, core, H264_MULTI_CO_MB_RW_CTL);
+	if (ret)
+		return ret;
+
+	addr = h264->mv_paddr + slot_size * h264->pic_state.buffer_index;
+	amvdec_write_dos(core, H264_MULTI_CO_MB_WR_ADDR, addr + offset);
+	amvdec_write_dos(core, H264_MULTI_CO_MB_RD_ADDR, 0);
+	if (picture->slice_type != V4L2_H264_SLICE_TYPE_B)
+		return 0;
+	if (!picture->num_ref_idx_l1_active ||
+	    h264->ref_list1[0].index >= H264_MULTI_DPB_SIZE)
+		return -EINVAL;
+
+	ref_slot = &h264->dpb.slots[h264->ref_list1[0].index];
+	if (!ref_slot->active ||
+	    ref_slot->buffer_index >= h264->capture_buf_count)
+		return -EINVAL;
+	addr = h264->mv_paddr + slot_size * ref_slot->buffer_index + offset;
+	ref_type = abs(h264->pic_state.poc.top -
+		       ref_slot->top_field_order_cnt) <
+		   abs(h264->pic_state.poc.top -
+		       ref_slot->bottom_field_order_cnt) ? 0 : 1;
+	amvdec_write_dos(core, H264_MULTI_CO_MB_RD_ADDR,
+			 (2 << 30) | (ref_type << 29) |
+			 ((addr >> 3) & GENMASK(28, 0)));
+
+	return 0;
+}
+
 static u32 h264_multi_buffer_info(const struct h264_multi_dpb_slot *slot,
 				  bool is_current,
 				  const struct h264_multi_poc *poc)
@@ -589,6 +705,9 @@ codec_h264_multi_configure_picture(struct amvdec_session *sess,
 		}
 	}
 	ret = codec_h264_multi_configure_references(sess);
+	if (ret)
+		return ret;
+	ret = codec_h264_multi_configure_mv(sess);
 	if (ret)
 		return ret;
 	amvdec_write_dos(core, H264_MULTI_DPB_STATUS, action);
