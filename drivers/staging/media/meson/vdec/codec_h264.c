@@ -293,9 +293,12 @@ static void codec_h264_resume(struct amvdec_session *sess)
 	struct codec_h264 *h264 = sess->priv;
 	u32 mb_width, mb_height, mb_total;
 
-	amvdec_set_canvases(sess,
-			    (u32[]){ ANC0_CANVAS_ADDR, 0 },
-			    (u32[]){ 24, 0 });
+	if (sess->canvas_reg_count)
+		amvdec_restore_canvases(sess);
+	else
+		amvdec_set_canvases(sess,
+				    (u32[]){ ANC0_CANVAS_ADDR, 0 },
+				    (u32[]){ 24, 0 });
 
 	dev_dbg(core->dev, "max_refs = %u; actual_dpb_size = %u\n",
 		h264->max_refs, sess->num_dst_bufs);
