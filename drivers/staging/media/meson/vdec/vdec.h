@@ -46,6 +46,12 @@ struct amvdec_timestamp {
 	u32 used_count;
 };
 
+struct amvdec_timestamp_info {
+	struct v4l2_timecode timecode;
+	u64 timestamp;
+	u32 flags;
+};
+
 struct amvdec_session;
 
 /**
