@@ -46,6 +46,9 @@ void amvdec_dst_buf_done_idx(struct amvdec_session *sess, u32 buf_idx,
 			     u32 offset, u32 field, u32 type);
 void amvdec_dst_buf_done(struct amvdec_session *sess,
 			 struct vb2_v4l2_buffer *vbuf, u32 field, u32 type);
+void amvdec_dst_buf_done_ts(struct amvdec_session *sess,
+			    struct vb2_v4l2_buffer *vbuf, u32 field, u32 type,
+			    const struct amvdec_timestamp_info *timestamp);
 void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 				struct vb2_v4l2_buffer *vbuf,
 				u32 offset, u32 field, u32 type, bool allow_drop);
@@ -61,6 +64,8 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
  */
 int amvdec_add_ts(struct amvdec_session *sess, u64 ts,
 		  struct v4l2_timecode tc, u32 offset, u32 flags);
+int amvdec_take_ts(struct amvdec_session *sess,
+		   struct amvdec_timestamp_info *timestamp);
 void amvdec_remove_ts(struct amvdec_session *sess, u64 ts);
 
 /**
