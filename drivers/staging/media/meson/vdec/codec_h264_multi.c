@@ -367,3 +367,52 @@ int codec_h264_multi_parse_marking(struct amvdec_session *sess,
 
 	return -EINVAL;
 }
+
+static s32 h264_multi_lmem_s32(const u16 value[2])
+{
+	return (s32)((u32)value[0] | (u32)value[1] << 16);
+}
+
+int codec_h264_multi_parse_picture(struct amvdec_session *sess,
+				   struct h264_multi_picture *picture)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	const struct h264_multi_lmem_dpb *dpb;
+	u16 picture_structure;
+
+	if (!h264 || !picture)
+		return -EINVAL;
+
+	memset(picture, 0, sizeof(*picture));
+	dpb = &h264->lmem.data.dpb;
+	picture->nal_unit_type = dpb->nal_info & GENMASK(4, 0);
+	picture->nal_ref_idc = FIELD_GET(GENMASK(6, 5), dpb->nal_info);
+	picture->slice_type = h264->lmem.data.params[H264_MULTI_PARAM_SLICE_TYPE];
+	picture->frame_num = dpb->frame_num;
+	picture->pic_order_cnt_lsb = dpb->pic_order_cnt_lsb;
+	picture->delta_pic_order_cnt_bottom =
+		h264_multi_lmem_s32(dpb->delta_pic_order_cnt_bottom);
+	picture->delta_pic_order_cnt[0] =
+		h264_multi_lmem_s32(dpb->delta_pic_order_cnt[0]);
+	picture->delta_pic_order_cnt[1] =
+		h264_multi_lmem_s32(dpb->delta_pic_order_cnt[1]);
+	picture->first_mb_in_slice =
+		h264->lmem.data.params[H264_MULTI_PARAM_FIRST_MB_IN_SLICE];
+
+	if (dpb->num_ref_idx_l0_active_minus1 >= V4L2_H264_REF_LIST_LEN ||
+	    dpb->num_ref_idx_l1_active_minus1 >= V4L2_H264_REF_LIST_LEN)
+		return -EINVAL;
+	picture->num_ref_idx_l0_active =
+		dpb->num_ref_idx_l0_active_minus1 + 1;
+	picture->num_ref_idx_l1_active =
+		dpb->num_ref_idx_l1_active_minus1 + 1;
+
+	picture_structure = h264->lmem.data.params
+		[H264_MULTI_PARAM_NEW_PICTURE_STRUCTURE];
+	if (picture_structure > 3)
+		return -EINVAL;
+	picture->field_pic = picture_structure == 1 || picture_structure == 2;
+	picture->bottom_field = picture_structure == 2;
+
+	return 0;
+}
