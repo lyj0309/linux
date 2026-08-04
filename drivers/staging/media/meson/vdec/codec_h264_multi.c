@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 #include <linux/dma-mapping.h>
+#include <linux/log2.h>
 #include <linux/slab.h>
+
+#include <media/v4l2-h264.h>
 
 #include "vdec_helpers.h"
 #include "dos_regs.h"
@@ -79,6 +82,11 @@ struct codec_h264_multi {
 	struct h264_multi_dpb dpb;
 	struct h264_multi_dpb_picture pic_state;
 	struct h264_multi_config config;
+	struct v4l2_ctrl_h264_decode_params decode_params;
+	struct v4l2_ctrl_h264_sps sps;
+	struct v4l2_h264_reflist_builder reflist_builder;
+	struct v4l2_h264_reference ref_list0[V4L2_H264_REF_LIST_LEN];
+	struct v4l2_h264_reference ref_list1[V4L2_H264_REF_LIST_LEN];
 	u32 scratch_f;
 	u32 iqidct_control;
 	u32 vcop_control;
@@ -365,6 +373,137 @@ static int codec_h264_multi_configure(struct amvdec_session *sess)
 }
 
 static int
+codec_h264_multi_write_ref_list(struct amvdec_session *sess,
+				const struct v4l2_h264_reference *refs,
+				unsigned int count)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+	unsigned int writes = 0;
+	unsigned int packed = 0;
+	unsigned int last_ref = 0;
+	u32 value = 0;
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		const struct h264_multi_dpb_slot *slot;
+		u8 ref;
+
+		if (refs[i].index >= H264_MULTI_DPB_SIZE)
+			return -EINVAL;
+		slot = &h264->dpb.slots[refs[i].index];
+		if (!slot->active || slot->buffer_index >= h264->capture_buf_count)
+			return -EINVAL;
+
+		ref = slot->buffer_index & GENMASK(4, 0);
+		if (refs[i].fields == V4L2_H264_FRAME_REF)
+			ref |= 3 << 5;
+		else if (refs[i].fields == V4L2_H264_TOP_FIELD_REF)
+			ref |= 1 << 5;
+		else if (refs[i].fields == V4L2_H264_BOTTOM_FIELD_REF)
+			ref |= 2 << 5;
+		else
+			return -EINVAL;
+
+		last_ref = ref;
+		value = (value << 8) | ref;
+		if (++packed == 4) {
+			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, value);
+			writes++;
+			packed = 0;
+			value = 0;
+		}
+	}
+
+	if (packed) {
+		while (packed++ < 4)
+			value = (value << 8) | last_ref;
+		amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, value);
+		writes++;
+	}
+
+	value = last_ref * 0x01010101;
+	while (writes++ < 8)
+		amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, value);
+
+	return 0;
+}
+
+static int codec_h264_multi_configure_references(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct h264_multi_picture *picture = &h264->pic_state.picture;
+	struct v4l2_ctrl_h264_decode_params *decode = &h264->decode_params;
+	struct v4l2_h264_reflist_builder *builder = &h264->reflist_builder;
+	struct v4l2_ctrl_h264_sps *sps = &h264->sps;
+	unsigned int l0_count = 0;
+	unsigned int l1_count = 0;
+	int ret;
+
+	memset(decode, 0, sizeof(*decode));
+	memset(sps, 0, sizeof(*sps));
+	h264_multi_dpb_to_v4l2(&h264->dpb, &h264->config, picture,
+			       decode->dpb);
+	decode->frame_num = picture->frame_num;
+	decode->top_field_order_cnt = h264->pic_state.poc.top;
+	decode->bottom_field_order_cnt = h264->pic_state.poc.bottom;
+	sps->log2_max_frame_num_minus4 = ilog2(h264->config.max_frame_num) - 4;
+
+	v4l2_h264_init_reflist_builder(builder, decode, sps, decode->dpb);
+	if (picture->slice_type == V4L2_H264_SLICE_TYPE_B) {
+		v4l2_h264_build_b_ref_lists(builder, h264->ref_list0,
+					    h264->ref_list1);
+		l0_count = picture->num_ref_idx_l0_active;
+		l1_count = picture->num_ref_idx_l1_active;
+	} else if (picture->slice_type == V4L2_H264_SLICE_TYPE_P ||
+		   picture->slice_type == V4L2_H264_SLICE_TYPE_SP) {
+		v4l2_h264_build_p_ref_list(builder, h264->ref_list0);
+		l0_count = picture->num_ref_idx_l0_active;
+	}
+	if (l0_count > builder->num_valid || l1_count > builder->num_valid)
+		return -EINVAL;
+
+	amvdec_write_dos(sess->core, H264_MULTI_BUFFER_INFO_INDEX, 0);
+	ret = codec_h264_multi_write_ref_list(sess, h264->ref_list0, l0_count);
+	if (ret)
+		return ret;
+	amvdec_write_dos(sess->core, H264_MULTI_BUFFER_INFO_INDEX, 8);
+	return codec_h264_multi_write_ref_list(sess, h264->ref_list1, l1_count);
+}
+
+static u32 h264_multi_buffer_info(const struct h264_multi_dpb_slot *slot,
+				  bool is_current,
+				  const struct h264_multi_poc *poc)
+{
+	u32 info = 0xf480;
+
+	if (slot && slot->long_term)
+		info |= BIT(4) | BIT(5);
+	if ((slot && slot->bottom_field_order_cnt < slot->top_field_order_cnt) ||
+	    (is_current && poc->bottom < poc->top))
+		info |= BIT(8);
+	if (is_current)
+		info |= 0xf;
+
+	return info;
+}
+
+static const struct h264_multi_dpb_slot *
+codec_h264_multi_find_buffer(struct codec_h264_multi *h264,
+			     unsigned int buffer_index)
+{
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (h264->dpb.slots[i].active &&
+		    h264->dpb.slots[i].buffer_index == buffer_index)
+			return &h264->dpb.slots[i];
+	}
+
+	return NULL;
+}
+
+static int
 codec_h264_multi_configure_picture(struct amvdec_session *sess,
 				   enum h264_multi_slice_action action)
 {
@@ -372,10 +511,14 @@ codec_h264_multi_configure_picture(struct amvdec_session *sess,
 	struct amvdec_core *core = sess->core;
 	unsigned int i;
 	u32 canvas;
+	int ret;
 
 	if (!h264 || !h264->pic_state.active ||
 	    h264->pic_state.buffer_index >= sess->num_dst_bufs)
 		return -EINVAL;
+	if (codec_h264_multi_find_buffer(h264,
+					 h264->pic_state.buffer_index))
+		return -EBUSY;
 
 	amvdec_write_dos(core, H264_MULTI_CURR_CANVAS_CTRL,
 			 h264->pic_state.buffer_index << 24);
@@ -386,19 +529,35 @@ codec_h264_multi_configure_picture(struct amvdec_session *sess,
 
 	amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_INDEX, 16);
 	for (i = 0; i < h264->capture_buf_count; i++) {
+		const struct h264_multi_dpb_slot *slot;
+		bool is_current = i == h264->pic_state.buffer_index;
+		s32 top = 0;
+		s32 bottom = 0;
+
+		slot = codec_h264_multi_find_buffer(h264, i);
+		if (slot) {
+			top = slot->top_field_order_cnt;
+			bottom = slot->bottom_field_order_cnt;
+		}
 		if (i == h264->pic_state.buffer_index) {
+			top = h264->pic_state.poc.top;
+			bottom = h264->pic_state.poc.bottom;
+		}
+		if (slot || is_current) {
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA,
-					 0xf48f);
-			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA,
-					 h264->pic_state.poc.top);
-			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA,
-					 h264->pic_state.poc.bottom);
+				h264_multi_buffer_info(slot, is_current,
+						       &h264->pic_state.poc));
+			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, top);
+			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, bottom);
 		} else {
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, 0);
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, 0);
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, 0);
 		}
 	}
+	ret = codec_h264_multi_configure_references(sess);
+	if (ret)
+		return ret;
 	amvdec_write_dos(core, H264_MULTI_DPB_STATUS, action);
 
 	return 0;
