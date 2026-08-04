@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 
 #include <media/v4l2-h264.h>
+#include <media/v4l2-mem2mem.h>
 
 #include "vdec_helpers.h"
 #include "dos_regs.h"
@@ -503,6 +504,36 @@ codec_h264_multi_find_buffer(struct codec_h264_multi *h264,
 	return NULL;
 }
 
+static int codec_h264_multi_get_buffer(struct amvdec_session *sess,
+				       struct vb2_v4l2_buffer **vbuf,
+				       u32 *buffer_index)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct vb2_v4l2_buffer *candidate;
+	unsigned int attempts;
+	unsigned int i;
+
+	for (attempts = 0; attempts < sess->num_dst_bufs; attempts++) {
+		candidate = v4l2_m2m_dst_buf_remove(sess->m2m_ctx);
+		if (!candidate)
+			break;
+		for (i = 0; i < sess->num_dst_bufs; i++) {
+			if (sess->fw_idx_to_vb2_idx[i] !=
+			    candidate->vb2_buf.index)
+				continue;
+			if (!codec_h264_multi_find_buffer(h264, i)) {
+				*vbuf = candidate;
+				*buffer_index = i;
+				return 0;
+			}
+			break;
+		}
+		v4l2_m2m_buf_queue(sess->m2m_ctx, candidate);
+	}
+
+	return -ENOBUFS;
+}
+
 static int
 codec_h264_multi_configure_picture(struct amvdec_session *sess,
 				   enum h264_multi_slice_action action)
@@ -611,18 +642,29 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 
 	if (status == H264_MULTI_SLICE_HEAD_DONE) {
 		struct h264_multi_picture picture;
+		struct vb2_v4l2_buffer *vbuf = NULL;
 		enum h264_multi_slice_action action;
+		u32 buffer_index = 0;
 		int ret;
 
 		ret = codec_h264_multi_parse_picture(sess, &picture);
+		if (h264->pic_state.active)
+			buffer_index = h264->pic_state.buffer_index;
+		if (!ret && !h264->pic_state.active)
+			ret = codec_h264_multi_get_buffer(sess, &vbuf,
+							  &buffer_index);
 		if (!ret)
 			ret = h264_multi_dpb_picture_begin(&h264->dpb, &h264->config,
 							   &h264->pic_state, &picture,
-							   h264->lmem.data.dpb.current_index,
+							   buffer_index,
 							   &action);
+		if (!ret && vbuf)
+			h264->pic_state.vbuf = vbuf;
 		if (!ret)
 			ret = codec_h264_multi_configure_picture(sess, action);
 		if (ret) {
+			if (vbuf)
+				v4l2_m2m_buf_queue(sess->m2m_ctx, vbuf);
 			dev_err(sess->core->dev,
 				"invalid H.264 picture state: %d\n", ret);
 			amvdec_abort(sess);
@@ -636,10 +678,14 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		int ret;
 		u32 buffer_index;
 		u32 buffer_type;
+		struct vb2_v4l2_buffer *vbuf;
 
 		buffer_index = h264->pic_state.buffer_index;
+		vbuf = h264->pic_state.vbuf;
 		buffer_type = codec_h264_multi_picture_type(&h264->pic_state.picture);
-		ret = codec_h264_multi_parse_marking(sess, &marking);
+		ret = vbuf ? 0 : -EINVAL;
+		if (!ret)
+			ret = codec_h264_multi_parse_marking(sess, &marking);
 		if (!ret)
 			ret = h264_multi_dpb_picture_finish(&h264->dpb, &h264->config,
 							    &h264->pic_state, &marking,
@@ -649,8 +695,8 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 				"unable to finish H.264 picture: %d\n", ret);
 			amvdec_abort(sess);
 		} else {
-			amvdec_dst_buf_done_idx(sess, buffer_index, -1,
-						V4L2_FIELD_NONE, buffer_type);
+			amvdec_dst_buf_done(sess, vbuf, V4L2_FIELD_NONE,
+					    buffer_type);
 		}
 		amvdec_m2m_job_yield(sess);
 	}
