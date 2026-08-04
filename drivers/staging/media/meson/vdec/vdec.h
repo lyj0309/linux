@@ -142,6 +142,9 @@ struct amvdec_ops {
  * @context_switching: the codec can save and restore its hardware context
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
+ * @has_pending_job: optional call if the codec has work that can run without
+ *		     a new OUTPUT buffer
+ * @job_ready: optional call to check whether a pending codec job can run
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
  * @can_recycle: optional call to know if the codec is ready to recycle
  *		 a dst buffer
@@ -163,6 +166,8 @@ struct amvdec_codec_ops {
 				const u8 *data, u32 len);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
+	bool (*has_pending_job)(struct amvdec_session *sess);
+	bool (*job_ready)(struct amvdec_session *sess);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);

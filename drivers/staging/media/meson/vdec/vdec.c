@@ -267,12 +267,22 @@ static void vdec_m2m_job_abort(void *priv)
 static int vdec_m2m_job_ready(void *priv)
 {
 	struct amvdec_session *sess = priv;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	bool src_ready;
 
 	if (!sess->streamon_out)
 		return 0;
+	if (codec_ops->has_pending_job &&
+	    codec_ops->has_pending_job(sess))
+		return sess->streamon_cap && codec_ops->job_ready &&
+			codec_ops->job_ready(sess);
+
+	src_ready = v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) > 0;
+	if (!src_ready)
+		return 0;
 
 	if (sess->status == STATUS_INIT && !sess->streamon_cap)
-		return 1;
+		return src_ready;
 
 	return sess->streamon_cap &&
 		v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) > 0;
@@ -1041,6 +1051,8 @@ static int vdec_open(struct file *file)
 	}
 	sess->m2m_ctx->ignore_cap_streaming = true;
 	sess->m2m_ctx->cap_q_ctx.buffered = true;
+	/* job_ready gates input and permits codec-internal resume jobs. */
+	sess->m2m_ctx->out_q_ctx.buffered = true;
 
 	ret = vdec_init_ctrls(sess);
 	if (ret)
