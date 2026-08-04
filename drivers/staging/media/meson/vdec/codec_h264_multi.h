@@ -33,11 +33,29 @@ enum h264_multi_action {
 	H264_MULTI_ACTION_DECODE_START = 0xff,
 };
 
+struct h264_multi_config {
+	u32 coded_width;
+	u32 coded_height;
+	u32 width;
+	u32 height;
+	u8 profile_idc;
+	u8 level_idc;
+	u8 chroma_format_idc;
+	u8 max_refs;
+	u8 num_reorder_frames;
+	u8 max_dec_frame_buffering;
+	bool frame_mbs_only;
+	bool bitstream_restriction;
+};
+
 int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
 void codec_h264_multi_release_firmware(struct amvdec_session *sess);
 int codec_h264_multi_read_lmem(struct amvdec_session *sess);
 u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 				       unsigned int index);
+int codec_h264_multi_parse_config(struct amvdec_session *sess,
+				  u32 seq_info2, u32 seq_info, u32 param4,
+				  struct h264_multi_config *config);
 
 #endif
