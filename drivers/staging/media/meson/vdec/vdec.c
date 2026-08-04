@@ -91,6 +91,7 @@ static int vdec_poweron(struct amvdec_session *sess)
 {
 	int ret;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
 	ret = clk_prepare_enable(sess->core->dos_parser_clk);
 	if (ret)
@@ -101,8 +102,11 @@ static int vdec_poweron(struct amvdec_session *sess)
 		goto disable_dos_parser;
 
 	ret = vdec_ops->start(sess);
-	if (ret)
+	if (ret) {
+		if (codec_ops->release && sess->priv)
+			codec_ops->release(sess);
 		goto disable_dos;
+	}
 
 	esparser_power_up(sess);
 
@@ -135,6 +139,8 @@ static void vdec_poweroff(struct amvdec_session *sess)
 		codec_ops->drain(sess);
 
 	vdec_ops->stop(sess);
+	if (codec_ops->release && sess->priv)
+		codec_ops->release(sess);
 	clk_disable_unprepare(sess->core->dos_clk);
 	clk_disable_unprepare(sess->core->dos_parser_clk);
 }
