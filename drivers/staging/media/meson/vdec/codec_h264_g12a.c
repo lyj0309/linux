@@ -109,6 +109,7 @@ struct codec_h264_multi {
 	struct v4l2_h264_reference ref_list1[V4L2_H264_REF_LIST_LEN];
 	struct h264_multi_picture pending_picture;
 	struct list_head frames;
+	struct mutex frames_lock; /* Protects frames and frame_count. */
 	unsigned int frame_count;
 	u32 scratch_f;
 	u32 iqidct_control;
@@ -197,6 +198,7 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 	memset(h264->workspace_vaddr, 0, H264_MULTI_WORKSPACE_SIZE);
 	h264_multi_dpb_reset(&h264->dpb);
 	INIT_LIST_HEAD(&h264->frames);
+	mutex_init(&h264->frames_lock);
 	sess->priv = h264;
 
 	return 0;
@@ -238,7 +240,7 @@ static void codec_h264_multi_output_frame(struct amvdec_session *sess,
 	kfree(frame);
 }
 
-static void codec_h264_multi_flush_output(struct amvdec_session *sess)
+static void __codec_h264_multi_flush_output(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	struct h264_multi_frame *frame;
@@ -247,7 +249,16 @@ static void codec_h264_multi_flush_output(struct amvdec_session *sess)
 		codec_h264_multi_output_frame(sess, frame);
 }
 
-static void codec_h264_multi_discard_output(struct amvdec_session *sess)
+static void codec_h264_multi_flush_output(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+
+	mutex_lock(&h264->frames_lock);
+	__codec_h264_multi_flush_output(sess);
+	mutex_unlock(&h264->frames_lock);
+}
+
+static void __codec_h264_multi_discard_output(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	struct h264_multi_frame *frame;
@@ -260,6 +271,15 @@ static void codec_h264_multi_discard_output(struct amvdec_session *sess)
 		kfree(frame);
 	}
 	h264->frame_count = 0;
+}
+
+static void codec_h264_multi_discard_output(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+
+	mutex_lock(&h264->frames_lock);
+	__codec_h264_multi_discard_output(sess);
+	mutex_unlock(&h264->frames_lock);
 }
 
 void codec_h264_multi_release_firmware(struct amvdec_session *sess)
@@ -282,6 +302,7 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 			  h264->lmem_vaddr, h264->lmem_paddr);
 	dma_free_coherent(core->dev, H264_MULTI_SWAP_SIZE,
 			  h264->fw_swap_vaddr, h264->fw_swap_paddr);
+	mutex_destroy(&h264->frames_lock);
 	kfree(h264);
 	sess->priv = NULL;
 }
@@ -914,11 +935,12 @@ static void codec_h264_multi_queue_frame(struct amvdec_session *sess,
 	struct codec_h264_multi *h264 = sess->priv;
 	unsigned int reorder_limit;
 
+	mutex_lock(&h264->frames_lock);
 	if (frame->type == 4) {
 		if (no_output_of_prior_pics)
-			codec_h264_multi_discard_output(sess);
+			__codec_h264_multi_discard_output(sess);
 		else
-			codec_h264_multi_flush_output(sess);
+			__codec_h264_multi_flush_output(sess);
 	}
 
 	list_add_tail(&frame->list, &h264->frames);
@@ -934,6 +956,7 @@ static void codec_h264_multi_queue_frame(struct amvdec_session *sess,
 		next = codec_h264_multi_next_frame(h264);
 		codec_h264_multi_output_frame(sess, next);
 	}
+	mutex_unlock(&h264->frames_lock);
 }
 
 static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
