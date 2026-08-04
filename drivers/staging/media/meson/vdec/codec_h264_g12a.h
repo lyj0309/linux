@@ -106,6 +106,6 @@ int codec_h264_multi_parse_marking(struct amvdec_session *sess,
 int codec_h264_multi_parse_picture(struct amvdec_session *sess,
 				   struct h264_multi_picture *picture);
 
-extern struct amvdec_codec_ops codec_h264_multi_ops;
+extern struct amvdec_codec_ops codec_h264_g12a_ops;
 
 #endif

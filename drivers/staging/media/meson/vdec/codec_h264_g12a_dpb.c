@@ -4,7 +4,7 @@
 
 #include <media/v4l2-h264.h>
 
-#include "codec_h264_multi_dpb.h"
+#include "codec_h264_g12a_dpb.h"
 
 void h264_multi_poc_reset(struct h264_multi_poc_state *state)
 {

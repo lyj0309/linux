@@ -3,7 +3,7 @@
 #ifndef __MESON_VDEC_CODEC_H264_MULTI_DPB_H_
 #define __MESON_VDEC_CODEC_H264_MULTI_DPB_H_
 
-#include "codec_h264_multi.h"
+#include "codec_h264_g12a.h"
 
 #define H264_MULTI_DPB_SIZE	V4L2_H264_NUM_DPB_ENTRIES
 
