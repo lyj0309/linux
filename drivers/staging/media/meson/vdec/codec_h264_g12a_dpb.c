@@ -619,3 +619,104 @@ void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
 			entries[i].flags |= V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM;
 	}
 }
+
+static int
+h264_multi_dpb_reorder_target(const struct h264_multi_dpb *dpb,
+			      const struct h264_multi_config *config,
+			      const struct h264_multi_picture *picture,
+			      unsigned int idc, unsigned int value,
+			      u32 *pic_num_pred,
+			      struct v4l2_h264_reference *target)
+{
+	bool long_term = idc == 2;
+	s32 pic_num;
+	unsigned int i;
+
+	if (idc < 2) {
+		u32 difference = value + 1;
+		u32 pic_num_no_wrap;
+
+		if (!config->max_frame_num || difference > config->max_frame_num)
+			return -EINVAL;
+		if (idc == 0)
+			pic_num_no_wrap = (*pic_num_pred + config->max_frame_num -
+					   difference) % config->max_frame_num;
+		else
+			pic_num_no_wrap = (*pic_num_pred + difference) %
+					  config->max_frame_num;
+		*pic_num_pred = pic_num_no_wrap;
+		pic_num = pic_num_no_wrap > picture->frame_num ?
+			(s32)pic_num_no_wrap - config->max_frame_num :
+			pic_num_no_wrap;
+	} else {
+		pic_num = value;
+	}
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		const struct h264_multi_dpb_slot *slot = &dpb->slots[i];
+
+		if (!slot->active || slot->long_term != long_term)
+			continue;
+		if (h264_multi_dpb_pic_num(slot, config, picture) != pic_num)
+			continue;
+		target->index = i;
+		target->fields = V4L2_H264_FRAME_REF;
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
+				   const struct h264_multi_config *config,
+				   const struct h264_multi_picture *picture,
+				   struct v4l2_h264_reference *refs,
+				   unsigned int num_valid,
+				   const u16 *commands,
+				   unsigned int num_commands)
+{
+	struct v4l2_h264_reference reordered[V4L2_H264_REF_LIST_LEN];
+	u32 pic_num_pred;
+	unsigned int ref_idx = 0;
+	unsigned int pos = 0;
+
+	if (!dpb || !config || !picture || !refs || !commands || !num_commands ||
+	    num_valid > ARRAY_SIZE(reordered))
+		return -EINVAL;
+	if (!num_valid)
+		return commands[0] == 3 ? 0 : -EINVAL;
+
+	pic_num_pred = picture->frame_num;
+	while (pos < num_commands) {
+		struct v4l2_h264_reference target;
+		unsigned int out;
+		unsigned int i;
+		u16 idc = commands[pos++];
+		int ret;
+
+		if (idc == 3)
+			return 0;
+		if (idc > 2 || pos >= num_commands || ref_idx >= num_valid)
+			return -EINVAL;
+		ret = h264_multi_dpb_reorder_target(dpb, config, picture, idc,
+						    commands[pos++],
+						    &pic_num_pred, &target);
+		if (ret)
+			return ret;
+
+		memcpy(reordered, refs, ref_idx * sizeof(*refs));
+		reordered[ref_idx] = target;
+		out = ref_idx + 1;
+		for (i = ref_idx; i < num_valid && out < num_valid; i++) {
+			if (refs[i].index == target.index)
+				continue;
+			reordered[out++] = refs[i];
+		}
+		if (out != num_valid)
+			return -EINVAL;
+		memcpy(refs, reordered, num_valid * sizeof(*refs));
+		ref_idx++;
+	}
+
+	return -EINVAL;
+}

@@ -587,6 +587,26 @@ static int codec_h264_multi_configure_references(struct amvdec_session *sess)
 	}
 	if (l0_count > builder->num_valid || l1_count > builder->num_valid)
 		return -EINVAL;
+	if (l0_count) {
+		ret = h264_multi_dpb_reorder_reflist(&h264->dpb,
+						     &h264->config, picture,
+						     h264->ref_list0,
+						     builder->num_valid,
+						     h264->lmem.data.mmco.l0_reorder,
+						     H264_MULTI_LMEM_REORDER_WORDS);
+		if (ret)
+			return ret;
+	}
+	if (l1_count) {
+		ret = h264_multi_dpb_reorder_reflist(&h264->dpb,
+						     &h264->config, picture,
+						     h264->ref_list1,
+						     builder->num_valid,
+						     h264->lmem.data.mmco.l1_reorder,
+						     H264_MULTI_LMEM_REORDER_WORDS);
+		if (ret)
+			return ret;
+	}
 
 	amvdec_write_dos(sess->core, H264_MULTI_BUFFER_INFO_INDEX, 0);
 	ret = codec_h264_multi_write_ref_list(sess, h264->ref_list0, l0_count);

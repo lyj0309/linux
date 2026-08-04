@@ -373,6 +373,113 @@ static void h264_multi_dpb_picture_sequence_error_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, pic_state.active);
 }
 
+static void h264_multi_reorder_short_term_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture picture = { .frame_num = 4 };
+	struct v4l2_h264_reference refs[] = {
+		{ .index = 0, .fields = V4L2_H264_FRAME_REF },
+		{ .index = 1, .fields = V4L2_H264_FRAME_REF },
+		{ .index = 2, .fields = V4L2_H264_FRAME_REF },
+	};
+	const u16 commands[] = { 0, 1, 3 };
+	struct h264_multi_dpb dpb = {};
+	int ret;
+
+	dpb.slots[0] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 3,
+	};
+	dpb.slots[1] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 2,
+	};
+	dpb.slots[2] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 1,
+	};
+	ret = h264_multi_dpb_reorder_reflist(&dpb, &config, &picture, refs,
+					     ARRAY_SIZE(refs), commands,
+					     ARRAY_SIZE(commands));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, refs[0].index, 1);
+	KUNIT_EXPECT_EQ(test, refs[1].index, 0);
+	KUNIT_EXPECT_EQ(test, refs[2].index, 2);
+}
+
+static void h264_multi_reorder_wrap_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture picture = { .frame_num = 1 };
+	struct v4l2_h264_reference refs[] = {
+		{ .index = 0, .fields = V4L2_H264_FRAME_REF },
+		{ .index = 1, .fields = V4L2_H264_FRAME_REF },
+	};
+	const u16 commands[] = { 0, 1, 3 };
+	struct h264_multi_dpb dpb = {};
+	int ret;
+
+	dpb.slots[0] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 0,
+	};
+	dpb.slots[1] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 15,
+	};
+	ret = h264_multi_dpb_reorder_reflist(&dpb, &config, &picture, refs,
+					     ARRAY_SIZE(refs), commands,
+					     ARRAY_SIZE(commands));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, refs[0].index, 1);
+	KUNIT_EXPECT_EQ(test, refs[1].index, 0);
+}
+
+static void h264_multi_reorder_long_term_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture picture = { .frame_num = 4 };
+	struct v4l2_h264_reference refs[] = {
+		{ .index = 0, .fields = V4L2_H264_FRAME_REF },
+		{ .index = 1, .fields = V4L2_H264_FRAME_REF },
+		{ .index = 2, .fields = V4L2_H264_FRAME_REF },
+	};
+	const u16 commands[] = { 2, 5, 3 };
+	struct h264_multi_dpb dpb = {};
+	int ret;
+
+	dpb.slots[0] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 3,
+	};
+	dpb.slots[1] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 2,
+	};
+	dpb.slots[2] = (struct h264_multi_dpb_slot) {
+		.active = true, .long_term = true, .long_term_frame_idx = 5,
+	};
+	ret = h264_multi_dpb_reorder_reflist(&dpb, &config, &picture, refs,
+					     ARRAY_SIZE(refs), commands,
+					     ARRAY_SIZE(commands));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, refs[0].index, 2);
+	KUNIT_EXPECT_EQ(test, refs[1].index, 0);
+	KUNIT_EXPECT_EQ(test, refs[2].index, 1);
+}
+
+static void h264_multi_reorder_invalid_test(struct kunit *test)
+{
+	struct h264_multi_config config = h264_multi_test_config(2);
+	struct h264_multi_picture picture = { .frame_num = 4 };
+	struct v4l2_h264_reference ref = {
+		.index = 0, .fields = V4L2_H264_FRAME_REF,
+	};
+	const u16 commands[] = { 0, 0 };
+	struct h264_multi_dpb dpb = {};
+	int ret;
+
+	dpb.slots[0] = (struct h264_multi_dpb_slot) {
+		.active = true, .frame_num = 3,
+	};
+	ret = h264_multi_dpb_reorder_reflist(&dpb, &config, &picture, &ref, 1,
+					     commands, ARRAY_SIZE(commands));
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_poc_type0_wrap_test),
 	KUNIT_CASE(h264_multi_poc_non_ref_commit_test),
@@ -386,6 +493,10 @@ static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_dpb_long_term_test),
 	KUNIT_CASE(h264_multi_dpb_multislice_picture_test),
 	KUNIT_CASE(h264_multi_dpb_picture_sequence_error_test),
+	KUNIT_CASE(h264_multi_reorder_short_term_test),
+	KUNIT_CASE(h264_multi_reorder_wrap_test),
+	KUNIT_CASE(h264_multi_reorder_long_term_test),
+	KUNIT_CASE(h264_multi_reorder_invalid_test),
 	{}
 };
 
