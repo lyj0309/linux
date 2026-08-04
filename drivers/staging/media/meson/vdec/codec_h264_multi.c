@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 
 #include "codec_h264_multi.h"
+#include "codec_h264_multi_lmem.h"
 
 #define H264_MULTI_FW_PAGES	7
 #define H264_MULTI_SWAP_PAGES	9
@@ -39,7 +40,10 @@ struct codec_h264_multi {
 	dma_addr_t fw_swap_paddr;
 	void *lmem_vaddr;
 	dma_addr_t lmem_paddr;
-	u16 lmem[H264_MULTI_LMEM_WORDS];
+	union {
+		u16 words[H264_MULTI_LMEM_WORDS];
+		struct h264_multi_lmem data;
+	} lmem;
 };
 
 static void h264_multi_copy_page(void *dst, unsigned int dst_page,
@@ -141,7 +145,7 @@ int codec_h264_multi_read_lmem(struct amvdec_session *sess)
 	dma_rmb();
 	for (i = 0; i < H264_MULTI_LMEM_WORDS; i += 4) {
 		for (j = 0; j < 4; j++)
-			h264->lmem[i + j] = src[i + 3 - j];
+			h264->lmem.words[i + j] = src[i + 3 - j];
 	}
 
 	return 0;
@@ -155,5 +159,5 @@ u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 	if (!h264 || index >= H264_MULTI_LMEM_WORDS)
 		return 0;
 
-	return h264->lmem[index];
+	return h264->lmem.words[index];
 }
