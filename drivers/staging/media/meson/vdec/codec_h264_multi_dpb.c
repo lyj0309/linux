@@ -424,6 +424,7 @@ static int h264_multi_dpb_store_current(struct h264_multi_dpb *dpb,
 					const struct h264_multi_picture *picture,
 					const struct h264_multi_poc *poc,
 					u64 reference_ts,
+					u32 buffer_index,
 					bool has_mmco5)
 {
 	struct h264_multi_dpb_slot *slot;
@@ -439,6 +440,7 @@ static int h264_multi_dpb_store_current(struct h264_multi_dpb *dpb,
 	slot = &dpb->slots[i];
 	slot->active = true;
 	slot->reference_ts = reference_ts;
+	slot->buffer_index = buffer_index;
 	slot->frame_num = has_mmco5 ? 0 : picture->frame_num;
 	slot->top_field_order_cnt = poc->top;
 	slot->bottom_field_order_cnt = poc->bottom;
@@ -477,7 +479,7 @@ int h264_multi_dpb_finish(struct h264_multi_dpb *dpb,
 			  const struct h264_multi_picture *picture,
 			  const struct h264_multi_marking *marking,
 			  const struct h264_multi_poc *poc,
-			  u64 reference_ts)
+			  u64 reference_ts, u32 buffer_index)
 {
 	bool has_mmco5 = false;
 	int ret = 0;
@@ -502,7 +504,7 @@ int h264_multi_dpb_finish(struct h264_multi_dpb *dpb,
 	}
 
 	ret = h264_multi_dpb_store_current(dpb, picture, poc, reference_ts,
-					   has_mmco5);
+					   buffer_index, has_mmco5);
 	if (ret)
 		return ret;
 commit:
@@ -572,7 +574,7 @@ int h264_multi_dpb_picture_finish(struct h264_multi_dpb *dpb,
 				  const struct h264_multi_config *config,
 				  struct h264_multi_dpb_picture *pic_state,
 				  const struct h264_multi_marking *marking,
-				  u64 reference_ts)
+				  u64 reference_ts, u32 buffer_index)
 {
 	int ret;
 
@@ -582,7 +584,7 @@ int h264_multi_dpb_picture_finish(struct h264_multi_dpb *dpb,
 		return -EPIPE;
 
 	ret = h264_multi_dpb_finish(dpb, config, &pic_state->picture, marking,
-				    &pic_state->poc, reference_ts);
+				    &pic_state->poc, reference_ts, buffer_index);
 	if (!ret)
 		h264_multi_dpb_picture_reset(pic_state);
 
