@@ -127,6 +127,7 @@ struct amvdec_ops {
  *
  * @start: mandatory call when the codec needs to initialize
  * @stop: mandatory call when the codec needs to stop
+ * @release: optional call to release session resources after hardware stop
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
@@ -144,6 +145,7 @@ struct amvdec_ops {
 struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
+	void (*release)(struct amvdec_session *sess);
 	int (*prepare_firmware)(struct amvdec_session *sess,
 				const u8 *data, u32 len);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
