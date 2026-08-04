@@ -202,6 +202,68 @@ void h264_multi_dpb_reset(struct h264_multi_dpb *dpb)
 	dpb->current_long_term_frame_idx = -1;
 }
 
+struct h264_level_limit {
+	u8 level_idc;
+	u32 max_dpb_mbs;
+};
+
+static const struct h264_level_limit h264_level_limits[] = {
+	{ 9, 396 },
+	{ 10, 396 },
+	{ 11, 900 },
+	{ 12, 2376 },
+	{ 13, 2376 },
+	{ 20, 2376 },
+	{ 21, 4752 },
+	{ 22, 8100 },
+	{ 30, 8100 },
+	{ 31, 18000 },
+	{ 32, 20480 },
+	{ 40, 32768 },
+	{ 41, 32768 },
+	{ 42, 34816 },
+	{ 50, 110400 },
+	{ 51, 184320 },
+	{ 52, 184320 },
+};
+
+int h264_multi_dpb_buf_count(const struct h264_multi_config *config,
+			     unsigned int *buf_count)
+{
+	u32 frame_mbs;
+	u32 dpb_frames;
+	unsigned int i;
+
+	if (!config || !buf_count || !config->coded_width ||
+	    !config->coded_height)
+		return -EINVAL;
+
+	frame_mbs = DIV_ROUND_UP(config->coded_width, 16) *
+		DIV_ROUND_UP(config->coded_height, 16);
+	for (i = 0; i < ARRAY_SIZE(h264_level_limits); i++) {
+		if (h264_level_limits[i].level_idc == config->level_idc)
+			break;
+	}
+	if (i == ARRAY_SIZE(h264_level_limits))
+		return -EINVAL;
+
+	dpb_frames = clamp(h264_level_limits[i].max_dpb_mbs / frame_mbs,
+			   1U, (u32)H264_MULTI_DPB_SIZE);
+	if (config->bitstream_restriction) {
+		if (config->max_dec_frame_buffering > H264_MULTI_DPB_SIZE ||
+		    config->num_reorder_frames >
+			config->max_dec_frame_buffering ||
+		    config->max_dec_frame_buffering < config->max_refs)
+			return -EINVAL;
+		dpb_frames = max_t(u32, 1, config->max_dec_frame_buffering);
+	} else {
+		dpb_frames = max_t(u32, dpb_frames, config->max_refs);
+	}
+
+	*buf_count = dpb_frames + 1;
+	return 0;
+}
+
 static void h264_multi_dpb_clear_refs(struct h264_multi_dpb *dpb)
 {
 	memset(dpb->slots, 0, sizeof(dpb->slots));

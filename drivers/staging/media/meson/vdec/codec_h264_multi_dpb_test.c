@@ -116,6 +116,41 @@ static void h264_multi_poc_type2_frame_wrap_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, poc.bottom, 34);
 }
 
+static void h264_multi_dpb_level_limit_test(struct kunit *test)
+{
+	struct h264_multi_config config = {
+		.coded_width = 1920,
+		.coded_height = 1088,
+		.level_idc = 40,
+		.max_refs = 4,
+	};
+	unsigned int count;
+
+	KUNIT_ASSERT_EQ(test, h264_multi_dpb_buf_count(&config, &count), 0);
+	KUNIT_EXPECT_EQ(test, count, 5U);
+}
+
+static void h264_multi_dpb_vui_limit_test(struct kunit *test)
+{
+	struct h264_multi_config config = {
+		.coded_width = 1280,
+		.coded_height = 720,
+		.level_idc = 31,
+		.max_refs = 2,
+		.num_reorder_frames = 2,
+		.max_dec_frame_buffering = 3,
+		.bitstream_restriction = true,
+	};
+	unsigned int count;
+
+	KUNIT_ASSERT_EQ(test, h264_multi_dpb_buf_count(&config, &count), 0);
+	KUNIT_EXPECT_EQ(test, count, 4U);
+
+	config.max_dec_frame_buffering = 1;
+	KUNIT_EXPECT_EQ(test, h264_multi_dpb_buf_count(&config, &count),
+			-EINVAL);
+}
+
 static unsigned int h264_multi_dpb_active_slots(struct h264_multi_dpb *dpb)
 {
 	unsigned int active = 0;
@@ -272,6 +307,8 @@ static struct kunit_case h264_multi_poc_test_cases[] = {
 	KUNIT_CASE(h264_multi_poc_mmco5_test),
 	KUNIT_CASE(h264_multi_poc_type1_cycle_test),
 	KUNIT_CASE(h264_multi_poc_type2_frame_wrap_test),
+	KUNIT_CASE(h264_multi_dpb_level_limit_test),
+	KUNIT_CASE(h264_multi_dpb_vui_limit_test),
 	KUNIT_CASE(h264_multi_dpb_sliding_window_test),
 	KUNIT_CASE(h264_multi_dpb_mmco1_test),
 	KUNIT_CASE(h264_multi_dpb_long_term_test),
