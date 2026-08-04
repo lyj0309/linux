@@ -13,6 +13,14 @@
 #define H264_MULTI_SWAP_SIZE	(H264_MULTI_SWAP_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_LMEM_WORDS	(PAGE_SIZE / sizeof(u16))
 
+#define H264_MULTI_MB_WIDTH_MASK		GENMASK(7, 0)
+#define H264_MULTI_MB_TOTAL_MASK		GENMASK(23, 8)
+#define H264_MULTI_CHROMA_FORMAT_MASK	GENMASK(14, 13)
+#define H264_MULTI_FRAME_MBS_ONLY	BIT(15)
+#define H264_MULTI_MAX_REFS_MASK		GENMASK(15, 8)
+#define H264_MULTI_SPS_BITSTREAM_RESTRICTION	BIT(3)
+#define H264_MULTI_MAX_DPB_SIZE		16
+
 enum h264_multi_fw_page {
 	H264_MULTI_FW_MAIN_0,
 	H264_MULTI_FW_MAIN_1,
@@ -160,4 +168,114 @@ u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 		return 0;
 
 	return h264->lmem.words[index];
+}
+
+static int h264_multi_crop_units(u8 chroma_format_idc,
+				 bool frame_mbs_only,
+				 u32 *crop_unit_x, u32 *crop_unit_y)
+{
+	switch (chroma_format_idc) {
+	case 0:
+		*crop_unit_x = 1;
+		*crop_unit_y = 2 - frame_mbs_only;
+		break;
+	case 1:
+		*crop_unit_x = 2;
+		*crop_unit_y = 2 * (2 - frame_mbs_only);
+		break;
+	case 2:
+		*crop_unit_x = 2;
+		*crop_unit_y = 2 - frame_mbs_only;
+		break;
+	case 3:
+		*crop_unit_x = 1;
+		*crop_unit_y = 2 - frame_mbs_only;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+int codec_h264_multi_parse_config(struct amvdec_session *sess,
+				  u32 seq_info2, u32 seq_info, u32 param4,
+				  struct h264_multi_config *config)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	u32 crop_bottom;
+	u32 crop_left;
+	u32 crop_right;
+	u32 crop_top;
+	u32 crop_unit_x;
+	u32 crop_unit_y;
+	u32 mb_height;
+	u32 mb_total;
+	u32 mb_width;
+	u16 sps_flags;
+	int ret;
+
+	if (!h264 || !config)
+		return -EINVAL;
+
+	memset(config, 0, sizeof(*config));
+	mb_width = FIELD_GET(H264_MULTI_MB_WIDTH_MASK, seq_info2);
+	mb_total = FIELD_GET(H264_MULTI_MB_TOTAL_MASK, seq_info2);
+	if (!mb_width && mb_total)
+		mb_width = 256;
+	if (!mb_width || !mb_total || mb_total % mb_width)
+		return -EINVAL;
+
+	mb_height = mb_total / mb_width;
+	config->coded_width = mb_width * 16;
+	config->coded_height = mb_height * 16;
+	if (config->coded_width > sess->fmt_out->max_width ||
+	    config->coded_height > sess->fmt_out->max_height)
+		return -ERANGE;
+
+	config->chroma_format_idc =
+		FIELD_GET(H264_MULTI_CHROMA_FORMAT_MASK, seq_info);
+	config->frame_mbs_only = !!(seq_info & H264_MULTI_FRAME_MBS_ONLY);
+	config->max_refs = FIELD_GET(H264_MULTI_MAX_REFS_MASK, param4);
+	config->profile_idc = h264->lmem.data.params
+		[H264_MULTI_PARAM_PROFILE_IDC_MMCO] >> 8;
+	config->level_idc = param4 & 0xff;
+	config->num_reorder_frames = h264->lmem.data.params
+		[H264_MULTI_PARAM_NUM_REORDER_FRAMES];
+	config->max_dec_frame_buffering = h264->lmem.data.params
+		[H264_MULTI_PARAM_MAX_BUFFER_FRAME];
+	sps_flags = h264->lmem.data.params[H264_MULTI_PARAM_SPS_FLAGS_2];
+	config->bitstream_restriction =
+		!!(sps_flags & H264_MULTI_SPS_BITSTREAM_RESTRICTION);
+
+	if (config->level_idc < 9 || config->level_idc > 52 ||
+	    config->max_refs > H264_MULTI_MAX_DPB_SIZE)
+		return -EINVAL;
+	if (config->bitstream_restriction &&
+	    (config->max_dec_frame_buffering > H264_MULTI_MAX_DPB_SIZE ||
+	     config->num_reorder_frames > config->max_dec_frame_buffering))
+		return -EINVAL;
+
+	ret = h264_multi_crop_units(config->chroma_format_idc,
+				    config->frame_mbs_only,
+				    &crop_unit_x, &crop_unit_y);
+	if (ret)
+		return ret;
+
+	crop_left = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_LEFT] *
+		crop_unit_x;
+	crop_right = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_RIGHT] *
+		crop_unit_x;
+	crop_top = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_TOP] *
+		crop_unit_y;
+	crop_bottom = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_BOTTOM] *
+		crop_unit_y;
+	if (crop_left + crop_right >= config->coded_width ||
+	    crop_top + crop_bottom >= config->coded_height)
+		return -EINVAL;
+
+	config->width = config->coded_width - crop_left - crop_right;
+	config->height = config->coded_height - crop_top - crop_bottom;
+
+	return 0;
 }
