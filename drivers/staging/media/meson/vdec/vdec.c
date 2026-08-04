@@ -517,16 +517,6 @@ unlock_ok:
 	return 0;
 }
 
-static void vdec_free_canvas(struct amvdec_session *sess)
-{
-	int i;
-
-	for (i = 0; i < sess->canvas_num; ++i)
-		meson_canvas_free(sess->core->canvas, sess->canvas_alloc[i]);
-
-	sess->canvas_num = 0;
-}
-
 static void vdec_reset_timestamps(struct amvdec_session *sess)
 {
 	struct amvdec_timestamp *tmp, *n;
@@ -579,7 +569,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 		else
 			core->exclusive_sess = NULL;
 
-		vdec_free_canvas(sess);
+		amvdec_free_canvases(sess);
 		dma_free_coherent(sess->core->dev, sess->vififo_size,
 				  sess->vififo_vaddr, sess->vififo_paddr);
 		vdec_reset_timestamps(sess);
@@ -602,6 +592,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 		while ((buf = v4l2_m2m_dst_buf_remove(sess->m2m_ctx)))
 			v4l2_m2m_buf_done(buf, VB2_BUF_STATE_ERROR);
 
+		amvdec_free_canvases(sess);
 		sess->streamon_cap = 0;
 	}
 
