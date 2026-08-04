@@ -11,9 +11,9 @@
 
 #include "vdec_helpers.h"
 #include "dos_regs.h"
-#include "codec_h264_multi.h"
-#include "codec_h264_multi_dpb.h"
-#include "codec_h264_multi_lmem.h"
+#include "codec_h264_g12a.h"
+#include "codec_h264_g12a_dpb.h"
+#include "codec_h264_g12a_lmem.h"
 
 #define H264_MULTI_FW_PAGES	7
 #define H264_MULTI_SWAP_PAGES	9
@@ -962,7 +962,7 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 	return IRQ_HANDLED;
 }
 
-struct amvdec_codec_ops codec_h264_multi_ops = {
+struct amvdec_codec_ops codec_h264_g12a_ops = {
 	.start = codec_h264_multi_start,
 	.stop = codec_h264_multi_stop,
 	.release = codec_h264_multi_release_firmware,
