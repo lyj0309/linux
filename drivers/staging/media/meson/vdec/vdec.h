@@ -128,6 +128,7 @@ struct amvdec_ops {
  * @start: mandatory call when the codec needs to initialize
  * @stop: mandatory call when the codec needs to stop
  * @release: optional call to release session resources after hardware stop
+ * @context_switching: the codec can save and restore its hardware context
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
@@ -146,6 +147,7 @@ struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
 	void (*release)(struct amvdec_session *sess);
+	bool context_switching;
 	int (*prepare_firmware)(struct amvdec_session *sess,
 				const u8 *data, u32 len);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
@@ -232,6 +234,11 @@ enum amvdec_status {
  * @vififo_vaddr: virtual address for the VIFIFO
  * @vififo_paddr: physical address for the VIFIFO
  * @vififo_size: size of the VIFIFO dma alloc
+ * @vififo_curr: saved VIFIFO current pointer
+ * @vififo_wp: saved VIFIFO write pointer
+ * @vififo_rp: saved VIFIFO read pointer
+ * @vififo_wrap_count: saved VIFIFO wrap counter
+ * @vififo_context_valid: whether the saved VIFIFO registers are valid
  * @bufs_recycle: list of buffers that need to be recycled
  * @bufs_recycle_lock: lock for the bufs_recycle list
  * @recycle_thread: task struct for the recycling thread
@@ -283,6 +290,11 @@ struct amvdec_session {
 	void *vififo_vaddr;
 	dma_addr_t vififo_paddr;
 	u32 vififo_size;
+	u32 vififo_curr;
+	u32 vififo_wp;
+	u32 vififo_rp;
+	u32 vififo_wrap_count;
+	bool vififo_context_valid;
 
 	struct list_head bufs_recycle;
 	struct mutex bufs_recycle_lock; /* bufs_recycle list lock */
