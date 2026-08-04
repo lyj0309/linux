@@ -73,6 +73,7 @@ struct codec_h264_multi {
 	u32 frame_counter;
 	u32 decode_seqinfo;
 	bool context_valid;
+	bool resume_pending;
 	union {
 		u16 words[H264_MULTI_LMEM_WORDS];
 		struct h264_multi_lmem data;
@@ -215,8 +216,15 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, H264_MULTI_INIT_FLAG,
 			 h264->context_valid);
 	amvdec_write_dos(core, H264_MULTI_FRAME_COUNTER, h264->frame_counter);
-	amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
-			 h264->context_valid ? H264_MULTI_ACTION_DECODE_START : 0);
+	if (h264->resume_pending) {
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_ACTION_CONFIG_DONE);
+		h264->resume_pending = false;
+	} else {
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 h264->context_valid ?
+				 H264_MULTI_ACTION_DECODE_START : 0);
+	}
 
 	return 0;
 }
@@ -240,8 +248,23 @@ static int codec_h264_multi_stop(struct amvdec_session *sess)
 
 static void codec_h264_multi_resume(struct amvdec_session *sess)
 {
-	amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
-			 H264_MULTI_ACTION_CONFIG_DONE);
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+	unsigned long flags;
+	bool active;
+
+	if (!h264)
+		return;
+
+	spin_lock_irqsave(&core->irq_lock, flags);
+	active = core->cur_sess == sess;
+	spin_unlock_irqrestore(&core->irq_lock, flags);
+
+	if (active)
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_ACTION_CONFIG_DONE);
+	else
+		h264->resume_pending = true;
 }
 
 static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
