@@ -214,12 +214,14 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 	if (synchronize)
 		disable_irq(core->vdec_irq);
 
+	mutex_lock(&sess->lock);
 	mutex_lock(&core->hw_lock);
 	if (core->cur_sess == sess) {
 		vdec_suspend(sess);
 		vdec_set_current_session(core, NULL);
 	}
 	mutex_unlock(&core->hw_lock);
+	mutex_unlock(&sess->lock);
 
 	if (synchronize)
 		enable_irq(core->vdec_irq);
