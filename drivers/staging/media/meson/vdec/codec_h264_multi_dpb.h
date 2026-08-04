@@ -46,6 +46,7 @@ struct h264_multi_dpb {
 struct h264_multi_dpb_picture {
 	struct h264_multi_picture picture;
 	struct h264_multi_poc poc;
+	struct vb2_v4l2_buffer *vbuf;
 	u32 buffer_index;
 	bool active;
 };
