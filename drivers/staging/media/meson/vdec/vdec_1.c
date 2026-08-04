@@ -71,7 +71,9 @@ vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
 		goto free_mc;
 	}
 
-	if (codec_ops->load_extended_firmware)
+	if (codec_ops->prepare_firmware)
+		ret = codec_ops->prepare_firmware(sess, fw->data, fw->size);
+	else if (codec_ops->load_extended_firmware)
 		ret = codec_ops->load_extended_firmware(sess,
 							fw->data + MC_SIZE,
 							fw->size - MC_SIZE);
