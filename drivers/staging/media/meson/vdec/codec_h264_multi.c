@@ -30,6 +30,9 @@
 #define H264_MULTI_HEAD_PADDING		AV_SCRATCH_3
 #define H264_MULTI_DECODE_MODE		AV_SCRATCH_4
 #define H264_MULTI_DECODE_SEQINFO	AV_SCRATCH_5
+#define H264_MULTI_SEQ_INFO2		AV_SCRATCH_1
+#define H264_MULTI_SEQ_INFO		AV_SCRATCH_2
+#define H264_MULTI_PARAM4		AV_SCRATCH_B
 #define H264_MULTI_FRAME_COUNTER		AV_SCRATCH_I
 #define H264_MULTI_DPB_STATUS		AV_SCRATCH_J
 #define H264_MULTI_LMEM_ADDR		AV_SCRATCH_L
@@ -66,12 +69,15 @@ struct codec_h264_multi {
 	void *workspace_vaddr;
 	dma_addr_t workspace_paddr;
 	struct h264_multi_dpb dpb;
+	struct h264_multi_config config;
 	u32 scratch_f;
 	u32 iqidct_control;
 	u32 vcop_control;
 	u32 vld_decode_control;
 	u32 frame_counter;
 	u32 decode_seqinfo;
+	unsigned int capture_buf_count;
+	bool config_valid;
 	bool context_valid;
 	bool resume_pending;
 	union {
@@ -274,6 +280,44 @@ static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
 	return IRQ_WAKE_THREAD;
 }
 
+static int codec_h264_multi_configure(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+	struct h264_multi_config config;
+	unsigned int capture_buf_count;
+	u32 seq_info2;
+	u32 seq_info;
+	u32 param4;
+	int ret;
+
+	seq_info2 = amvdec_read_dos(core, H264_MULTI_SEQ_INFO2);
+	seq_info = amvdec_read_dos(core, H264_MULTI_SEQ_INFO);
+	param4 = amvdec_read_dos(core, H264_MULTI_PARAM4);
+	ret = codec_h264_multi_parse_config(sess, seq_info2, seq_info,
+					    param4, &config);
+	if (ret)
+		return ret;
+
+	ret = h264_multi_dpb_buf_count(&config, &capture_buf_count);
+	if (ret)
+		return ret;
+
+	if (!h264->config_valid ||
+	    memcmp(&h264->config, &config, sizeof(config)))
+		h264_multi_dpb_reset(&h264->dpb);
+
+	h264->config = config;
+	h264->config_valid = true;
+	h264->capture_buf_count = capture_buf_count;
+	h264->decode_seqinfo = seq_info2;
+	h264->context_valid = true;
+
+	amvdec_src_change(sess, config.width, config.height,
+			  capture_buf_count, 8);
+	return 0;
+}
+
 static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
@@ -294,6 +338,19 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		if (codec_h264_multi_read_lmem(sess))
 			return IRQ_NONE;
 		h264->context_valid = true;
+	}
+
+	if (status == H264_MULTI_CONFIG_REQUEST) {
+		if (codec_h264_multi_configure(sess)) {
+			dev_err(sess->core->dev,
+				"invalid H.264 sequence configuration\n");
+			amvdec_abort(sess);
+			amvdec_m2m_job_yield(sess);
+			return IRQ_HANDLED;
+		}
+		if (sess->status == STATUS_NEEDS_RESUME)
+			amvdec_m2m_job_yield(sess);
+		return IRQ_HANDLED;
 	}
 
 	if (status == H264_MULTI_PIC_DATA_DONE)
