@@ -244,17 +244,47 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 		[H264_MULTI_PARAM_NUM_REORDER_FRAMES];
 	config->max_dec_frame_buffering = h264->lmem.data.params
 		[H264_MULTI_PARAM_MAX_BUFFER_FRAME];
+	config->pic_order_cnt_type = h264->lmem.data.params
+		[H264_MULTI_PARAM_PIC_ORDER_CNT_TYPE];
+	config->num_ref_frames_in_poc_cycle = h264->lmem.data.params
+		[H264_MULTI_PARAM_NUM_REF_FRAMES_IN_POC_CYCLE];
+	config->offset_for_non_ref_pic = (s16)h264->lmem.data.params
+		[H264_MULTI_PARAM_OFFSET_FOR_NON_REF_PIC];
+	config->offset_for_top_to_bottom_field = (s16)h264->lmem.data.params
+		[H264_MULTI_PARAM_OFFSET_FOR_TOP_TO_BOTTOM_FIELD];
+	config->delta_pic_order_always_zero = !!h264->lmem.data.params
+		[H264_MULTI_PARAM_DELTA_POC_ALWAYS_ZERO];
+	config->frame_num_gap_allowed = !!h264->lmem.data.params
+		[H264_MULTI_PARAM_FRAME_NUM_GAP_ALLOWED];
 	sps_flags = h264->lmem.data.params[H264_MULTI_PARAM_SPS_FLAGS_2];
 	config->bitstream_restriction =
 		!!(sps_flags & H264_MULTI_SPS_BITSTREAM_RESTRICTION);
 
 	if (config->level_idc < 9 || config->level_idc > 52 ||
-	    config->max_refs > H264_MULTI_MAX_DPB_SIZE)
+	    config->max_refs > H264_MULTI_MAX_DPB_SIZE ||
+	    config->pic_order_cnt_type > 2 ||
+	    config->num_ref_frames_in_poc_cycle > H264_MULTI_LMEM_REF_WORDS)
 		return -EINVAL;
 	if (config->bitstream_restriction &&
 	    (config->max_dec_frame_buffering > H264_MULTI_MAX_DPB_SIZE ||
 	     config->num_reorder_frames > config->max_dec_frame_buffering))
 		return -EINVAL;
+	if (h264->lmem.data.params[H264_MULTI_PARAM_LOG2_MAX_FRAME_NUM] < 4 ||
+	    h264->lmem.data.params[H264_MULTI_PARAM_LOG2_MAX_FRAME_NUM] > 16)
+		return -EINVAL;
+	config->max_frame_num = 1U << h264->lmem.data.params
+		[H264_MULTI_PARAM_LOG2_MAX_FRAME_NUM];
+	if (config->pic_order_cnt_type == 0) {
+		u16 log2_max_poc = h264->lmem.data.params
+			[H264_MULTI_PARAM_LOG2_MAX_PIC_ORDER_CNT_LSB];
+
+		if (log2_max_poc < 4 || log2_max_poc > 16)
+			return -EINVAL;
+		config->max_pic_order_cnt_lsb = 1U << log2_max_poc;
+	}
+	for (ret = 0; ret < config->num_ref_frames_in_poc_cycle; ret++)
+		config->offset_for_ref_frame[ret] =
+			(s16)h264->lmem.data.mmco.offset_for_ref_frame[ret];
 
 	ret = h264_multi_crop_units(config->chroma_format_idc,
 				    config->frame_mbs_only,
