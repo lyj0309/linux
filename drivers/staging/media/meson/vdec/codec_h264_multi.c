@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 
 #include "codec_h264_multi.h"
+#include "codec_h264_multi_dpb.h"
 #include "codec_h264_multi_lmem.h"
 
 #define H264_MULTI_FW_PAGES	7
@@ -12,6 +13,7 @@
 #define H264_MULTI_FW_SIZE	(H264_MULTI_FW_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_SWAP_SIZE	(H264_MULTI_SWAP_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_LMEM_WORDS	(PAGE_SIZE / sizeof(u16))
+#define H264_MULTI_WORKSPACE_SIZE	(ALIGN((SZ_2M + SZ_32K + SZ_128K + 128), PAGE_SIZE))
 
 #define H264_MULTI_MB_WIDTH_MASK		GENMASK(7, 0)
 #define H264_MULTI_MB_TOTAL_MASK		GENMASK(23, 8)
@@ -48,6 +50,9 @@ struct codec_h264_multi {
 	dma_addr_t fw_swap_paddr;
 	void *lmem_vaddr;
 	dma_addr_t lmem_paddr;
+	void *workspace_vaddr;
+	dma_addr_t workspace_paddr;
+	struct h264_multi_dpb dpb;
 	union {
 		u16 words[H264_MULTI_LMEM_WORDS];
 		struct h264_multi_lmem data;
@@ -108,13 +113,24 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 					      &h264->lmem_paddr, GFP_KERNEL);
 	if (!h264->lmem_vaddr)
 		goto free_swap;
+	h264->workspace_vaddr = dma_alloc_coherent(core->dev,
+						   H264_MULTI_WORKSPACE_SIZE,
+						   &h264->workspace_paddr,
+						   GFP_KERNEL);
+	if (!h264->workspace_vaddr)
+		goto free_lmem;
 
 	h264_multi_build_swap_image(h264->fw_swap_vaddr, data);
 	memset(h264->lmem_vaddr, 0, PAGE_SIZE);
+	memset(h264->workspace_vaddr, 0, H264_MULTI_WORKSPACE_SIZE);
+	h264_multi_dpb_reset(&h264->dpb);
 	sess->priv = h264;
 
 	return 0;
 
+free_lmem:
+	dma_free_coherent(core->dev, PAGE_SIZE,
+			  h264->lmem_vaddr, h264->lmem_paddr);
 free_swap:
 	dma_free_coherent(core->dev, H264_MULTI_SWAP_SIZE,
 			  h264->fw_swap_vaddr, h264->fw_swap_paddr);
@@ -131,6 +147,8 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 	if (!h264)
 		return;
 
+	dma_free_coherent(core->dev, H264_MULTI_WORKSPACE_SIZE,
+			  h264->workspace_vaddr, h264->workspace_paddr);
 	dma_free_coherent(core->dev, PAGE_SIZE,
 			  h264->lmem_vaddr, h264->lmem_paddr);
 	dma_free_coherent(core->dev, H264_MULTI_SWAP_SIZE,
