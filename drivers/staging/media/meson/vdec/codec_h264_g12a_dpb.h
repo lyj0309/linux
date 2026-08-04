@@ -95,5 +95,12 @@ void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
 			    const struct h264_multi_config *config,
 			    const struct h264_multi_picture *picture,
 			    struct v4l2_h264_dpb_entry *entries);
+int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
+				   const struct h264_multi_config *config,
+				   const struct h264_multi_picture *picture,
+				   struct v4l2_h264_reference *refs,
+				   unsigned int num_valid,
+				   const u16 *commands,
+				   unsigned int num_commands);
 
 #endif
