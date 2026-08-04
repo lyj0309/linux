@@ -48,6 +48,24 @@ struct h264_multi_config {
 	bool bitstream_restriction;
 };
 
+#define H264_MULTI_MAX_MMCO_OPS	43
+
+struct h264_multi_mmco {
+	u8 opcode;
+	u16 difference_of_pic_nums_minus1;
+	u16 long_term_pic_num;
+	u16 long_term_frame_idx;
+	u16 max_long_term_frame_idx_plus1;
+};
+
+struct h264_multi_marking {
+	bool no_output_of_prior_pics;
+	bool long_term_reference;
+	bool adaptive;
+	u8 count;
+	struct h264_multi_mmco ops[H264_MULTI_MAX_MMCO_OPS];
+};
+
 int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
 void codec_h264_multi_release_firmware(struct amvdec_session *sess);
@@ -57,5 +75,7 @@ u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 int codec_h264_multi_parse_config(struct amvdec_session *sess,
 				  u32 seq_info2, u32 seq_info, u32 param4,
 				  struct h264_multi_config *config);
+int codec_h264_multi_parse_marking(struct amvdec_session *sess,
+				   struct h264_multi_marking *marking);
 
 #endif
