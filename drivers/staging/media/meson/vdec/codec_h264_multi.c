@@ -97,6 +97,8 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 
 	if (len < H264_MULTI_FW_SIZE)
 		return -EINVAL;
+	if (sess->priv)
+		return 0;
 
 	h264 = kzalloc_obj(*h264);
 	if (!h264)
