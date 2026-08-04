@@ -80,6 +80,14 @@ enum h264_multi_swap_page {
 	H264_MULTI_SWAP_MAIN_SLICE,
 };
 
+struct h264_multi_frame {
+	struct list_head list;
+	struct vb2_v4l2_buffer *vbuf;
+	struct amvdec_timestamp_info timestamp;
+	s32 poc;
+	u32 type;
+};
+
 struct codec_h264_multi {
 	void *fw_swap_vaddr;
 	dma_addr_t fw_swap_paddr;
@@ -99,6 +107,8 @@ struct codec_h264_multi {
 	struct v4l2_h264_reflist_builder reflist_builder;
 	struct v4l2_h264_reference ref_list0[V4L2_H264_REF_LIST_LEN];
 	struct v4l2_h264_reference ref_list1[V4L2_H264_REF_LIST_LEN];
+	struct list_head frames;
+	unsigned int frame_count;
 	u32 scratch_f;
 	u32 iqidct_control;
 	u32 vcop_control;
@@ -182,6 +192,7 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 	memset(h264->lmem_vaddr, 0, PAGE_SIZE);
 	memset(h264->workspace_vaddr, 0, H264_MULTI_WORKSPACE_SIZE);
 	h264_multi_dpb_reset(&h264->dpb);
+	INIT_LIST_HEAD(&h264->frames);
 	sess->priv = h264;
 
 	return 0;
@@ -197,6 +208,56 @@ free_h264:
 	return -ENOMEM;
 }
 
+static struct h264_multi_frame *
+codec_h264_multi_next_frame(struct codec_h264_multi *h264)
+{
+	struct h264_multi_frame *frame;
+	struct h264_multi_frame *next = NULL;
+
+	list_for_each_entry(frame, &h264->frames, list) {
+		if (!next || frame->poc < next->poc)
+			next = frame;
+	}
+
+	return next;
+}
+
+static void codec_h264_multi_output_frame(struct amvdec_session *sess,
+					  struct h264_multi_frame *frame)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+
+	list_del(&frame->list);
+	h264->frame_count--;
+	amvdec_dst_buf_done_ts(sess, frame->vbuf, V4L2_FIELD_NONE, frame->type,
+			       &frame->timestamp);
+	kfree(frame);
+}
+
+static void codec_h264_multi_flush_output(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct h264_multi_frame *frame;
+
+	while ((frame = codec_h264_multi_next_frame(h264)))
+		codec_h264_multi_output_frame(sess, frame);
+}
+
+static void codec_h264_multi_discard_output(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct h264_multi_frame *frame;
+	struct h264_multi_frame *next;
+
+	list_for_each_entry_safe(frame, next, &h264->frames, list) {
+		list_del(&frame->list);
+		v4l2_m2m_buf_done(frame->vbuf, VB2_BUF_STATE_ERROR);
+		atomic_dec_if_positive(&sess->esparser_queued_bufs);
+		kfree(frame);
+	}
+	h264->frame_count = 0;
+}
+
 void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
@@ -206,6 +267,7 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 		return;
 	if (h264->pic_state.vbuf)
 		v4l2_m2m_buf_done(h264->pic_state.vbuf, VB2_BUF_STATE_ERROR);
+	codec_h264_multi_discard_output(sess);
 	if (h264->mv_vaddr)
 		dma_free_coherent(core->dev, h264->mv_size,
 				  h264->mv_vaddr, h264->mv_paddr);
@@ -726,6 +788,35 @@ static u32 codec_h264_multi_picture_type(const struct h264_multi_picture *pictur
 	return 2;
 }
 
+static void codec_h264_multi_queue_frame(struct amvdec_session *sess,
+					 struct h264_multi_frame *frame,
+					 bool no_output_of_prior_pics)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	unsigned int reorder_limit;
+
+	if (frame->type == 4) {
+		if (no_output_of_prior_pics)
+			codec_h264_multi_discard_output(sess);
+		else
+			codec_h264_multi_flush_output(sess);
+	}
+
+	list_add_tail(&frame->list, &h264->frames);
+	h264->frame_count++;
+	if (h264->config.bitstream_restriction)
+		reorder_limit = h264->config.num_reorder_frames;
+	else
+		reorder_limit = min_t(unsigned int, h264->config.max_refs,
+				      h264->capture_buf_count - 1);
+	while (h264->frame_count > reorder_limit) {
+		struct h264_multi_frame *next;
+
+		next = codec_h264_multi_next_frame(h264);
+		codec_h264_multi_output_frame(sess, next);
+	}
+}
+
 static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
@@ -819,29 +910,51 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 	}
 
 	if (status == H264_MULTI_PIC_DATA_DONE) {
+		struct h264_multi_frame *frame = NULL;
 		struct h264_multi_marking marking;
-		int ret;
-		u32 buffer_index;
-		u32 buffer_type;
 		struct vb2_v4l2_buffer *vbuf;
+		u32 buffer_index;
+		bool timestamp_taken = false;
+		int ret;
 
 		buffer_index = h264->pic_state.buffer_index;
 		vbuf = h264->pic_state.vbuf;
-		buffer_type = codec_h264_multi_picture_type(&h264->pic_state.picture);
 		ret = vbuf ? 0 : -EINVAL;
+		if (!ret) {
+			frame = kzalloc_obj(*frame);
+			if (!frame)
+				ret = -ENOMEM;
+		}
+		if (!ret) {
+			frame->vbuf = vbuf;
+			frame->poc = min(h264->pic_state.poc.top,
+					 h264->pic_state.poc.bottom);
+			frame->type = codec_h264_multi_picture_type(&h264->pic_state.picture);
+		}
 		if (!ret)
 			ret = codec_h264_multi_parse_marking(sess, &marking);
+		if (!ret) {
+			ret = amvdec_take_ts(sess, &frame->timestamp);
+			timestamp_taken = !ret;
+		}
 		if (!ret)
 			ret = h264_multi_dpb_picture_finish(&h264->dpb, &h264->config,
 							    &h264->pic_state, &marking,
-							    buffer_index, buffer_index);
+							    frame->timestamp.timestamp,
+							    buffer_index);
 		if (ret) {
 			dev_err(sess->core->dev,
 				"unable to finish H.264 picture: %d\n", ret);
+			if (frame && timestamp_taken) {
+				v4l2_m2m_buf_done(frame->vbuf, VB2_BUF_STATE_ERROR);
+				atomic_dec_if_positive(&sess->esparser_queued_bufs);
+				h264_multi_dpb_picture_reset(&h264->pic_state);
+			}
+			kfree(frame);
 			amvdec_abort(sess);
 		} else {
-			amvdec_dst_buf_done(sess, vbuf, V4L2_FIELD_NONE,
-					    buffer_type);
+			codec_h264_multi_queue_frame(sess, frame,
+						     marking.no_output_of_prior_pics);
 		}
 		amvdec_m2m_job_yield(sess);
 	}
@@ -855,6 +968,7 @@ struct amvdec_codec_ops codec_h264_multi_ops = {
 	.release = codec_h264_multi_release_firmware,
 	.context_switching = true,
 	.prepare_firmware = codec_h264_multi_prepare_firmware,
+	.drain = codec_h264_multi_flush_output,
 	.resume = codec_h264_multi_resume,
 	.isr = codec_h264_multi_isr,
 	.threaded_isr = codec_h264_multi_threaded_isr,
