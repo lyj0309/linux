@@ -136,6 +136,9 @@ static void __vdec_1_stop(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
+	if (sess->priv)
+		codec_ops->stop(sess);
+
 	amvdec_write_dos(core, MPSR, 0);
 	amvdec_write_dos(core, CPSR, 0);
 	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 0);
@@ -160,8 +163,6 @@ static void __vdec_1_stop(struct amvdec_session *sess)
 		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
 				   GEN_PWR_VDEC_1, GEN_PWR_VDEC_1);
 
-	if (sess->priv)
-		codec_ops->stop(sess);
 }
 
 static int vdec_1_stop(struct amvdec_session *sess)
