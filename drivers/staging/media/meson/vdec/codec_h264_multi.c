@@ -484,7 +484,7 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		if (!ret)
 			ret = h264_multi_dpb_picture_finish(&h264->dpb, &h264->config,
 							    &h264->pic_state, &marking,
-							    buffer_index);
+							    buffer_index, buffer_index);
 		if (ret) {
 			dev_err(sess->core->dev,
 				"unable to finish H.264 picture: %d\n", ret);
