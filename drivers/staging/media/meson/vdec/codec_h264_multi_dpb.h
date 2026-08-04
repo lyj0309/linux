@@ -42,6 +42,18 @@ struct h264_multi_dpb {
 	s32 current_long_term_frame_idx;
 };
 
+struct h264_multi_dpb_picture {
+	struct h264_multi_picture picture;
+	struct h264_multi_poc poc;
+	u32 buffer_index;
+	bool active;
+};
+
+enum h264_multi_slice_action {
+	H264_MULTI_SLICE_NEW_PICTURE,
+	H264_MULTI_SLICE_CONTINUE,
+};
+
 void h264_multi_poc_reset(struct h264_multi_poc_state *state);
 int h264_multi_poc_derive(struct h264_multi_poc_state *state,
 			  const struct h264_multi_config *config,
@@ -65,6 +77,18 @@ int h264_multi_dpb_finish(struct h264_multi_dpb *dpb,
 			  const struct h264_multi_marking *marking,
 			  const struct h264_multi_poc *poc,
 			  u64 reference_ts);
+void h264_multi_dpb_picture_reset(struct h264_multi_dpb_picture *pic_state);
+int h264_multi_dpb_picture_begin(struct h264_multi_dpb *dpb,
+				 const struct h264_multi_config *config,
+				 struct h264_multi_dpb_picture *pic_state,
+				 const struct h264_multi_picture *picture,
+				 u32 buffer_index,
+				 enum h264_multi_slice_action *action);
+int h264_multi_dpb_picture_finish(struct h264_multi_dpb *dpb,
+				  const struct h264_multi_config *config,
+				  struct h264_multi_dpb_picture *pic_state,
+				  const struct h264_multi_marking *marking,
+				  u64 reference_ts);
 void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
 			    const struct h264_multi_config *config,
 			    const struct h264_multi_picture *picture,
