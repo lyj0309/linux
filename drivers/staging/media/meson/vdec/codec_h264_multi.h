@@ -66,6 +66,21 @@ struct h264_multi_marking {
 	struct h264_multi_mmco ops[H264_MULTI_MAX_MMCO_OPS];
 };
 
+struct h264_multi_picture {
+	u16 frame_num;
+	u16 pic_order_cnt_lsb;
+	s32 delta_pic_order_cnt_bottom;
+	s32 delta_pic_order_cnt[2];
+	u16 first_mb_in_slice;
+	u8 nal_unit_type;
+	u8 nal_ref_idc;
+	u8 slice_type;
+	u8 num_ref_idx_l0_active;
+	u8 num_ref_idx_l1_active;
+	bool field_pic;
+	bool bottom_field;
+};
+
 int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
 void codec_h264_multi_release_firmware(struct amvdec_session *sess);
@@ -77,5 +92,7 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 				  struct h264_multi_config *config);
 int codec_h264_multi_parse_marking(struct amvdec_session *sess,
 				   struct h264_multi_marking *marking);
+int codec_h264_multi_parse_picture(struct amvdec_session *sess,
+				   struct h264_multi_picture *picture);
 
 #endif
