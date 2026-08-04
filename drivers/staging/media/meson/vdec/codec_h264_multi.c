@@ -36,6 +36,7 @@
 #define H264_MULTI_FRAME_COUNTER		AV_SCRATCH_I
 #define H264_MULTI_DPB_STATUS		AV_SCRATCH_J
 #define H264_MULTI_LMEM_ADDR		AV_SCRATCH_L
+#define H264_MULTI_DPB_CONFIG		AV_SCRATCH_7
 
 #define H264_MULTI_DECODE_MODE_STREAM	2
 
@@ -186,10 +187,33 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 	sess->priv = NULL;
 }
 
+static int codec_h264_multi_setup_canvases(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	int ret;
+
+	if (sess->canvas_reg_count) {
+		amvdec_restore_canvases(sess);
+	} else {
+		ret = amvdec_set_canvases(sess,
+					  (u32[]){ ANC0_CANVAS_ADDR, 0 },
+					  (u32[]){ 24, 0 });
+		if (ret)
+			return ret;
+	}
+
+	amvdec_write_dos(sess->core, H264_MULTI_DPB_CONFIG,
+			 (h264->config.max_refs << 24) |
+			 (h264->capture_buf_count << 16) |
+			 (h264->capture_buf_count << 8));
+	return 0;
+}
+
 static int codec_h264_multi_start(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	struct amvdec_core *core = sess->core;
+	int ret;
 
 	if (!h264)
 		return -EINVAL;
@@ -206,6 +230,11 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, H264_MULTI_LMEM_ADDR, h264->lmem_paddr);
 	amvdec_write_dos(core, AV_SCRATCH_F,
 			 (h264->scratch_f & 0xffffffc3) | BIT(4));
+	if (h264->config_valid && sess->streamon_cap) {
+		ret = codec_h264_multi_setup_canvases(sess);
+		if (ret)
+			return ret;
+	}
 
 	if (h264->context_valid) {
 		amvdec_write_dos(core, IQIDCT_CONTROL, h264->iqidct_control);
@@ -266,11 +295,18 @@ static void codec_h264_multi_resume(struct amvdec_session *sess)
 	active = core->cur_sess == sess;
 	spin_unlock_irqrestore(&core->irq_lock, flags);
 
-	if (active)
+	if (active) {
+		if (codec_h264_multi_setup_canvases(sess)) {
+			amvdec_abort(sess);
+			return;
+		}
+	}
+	if (active) {
 		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
 				 H264_MULTI_ACTION_CONFIG_DONE);
-	else
+	} else {
 		h264->resume_pending = true;
+	}
 }
 
 static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
