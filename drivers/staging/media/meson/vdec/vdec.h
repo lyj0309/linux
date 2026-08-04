@@ -69,6 +69,8 @@ struct amvdec_session;
  * @esparser_wq: wait queue for parser fetch completion
  * @esparser_search_done: parser fetch completion flag
  * @cur_sess: current decoding session
+ * @exclusive_sess: streaming session for a codec that cannot context switch
+ * @context_switching_sessions: number of streaming switchable sessions
  * @lock: video device lock
  * @hw_lock: serializes decoder hardware ownership transitions
  * @irq_lock: protects the current session observed by IRQ handlers
@@ -100,6 +102,8 @@ struct amvdec_core {
 	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
+	struct amvdec_session *exclusive_sess;
+	unsigned int context_switching_sessions;
 	struct mutex lock;
 	struct mutex hw_lock; /* Serializes hardware ownership changes. */
 	spinlock_t irq_lock; /* Protects cur_sess for IRQ handlers. */
@@ -319,7 +323,9 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+int amvdec_m2m_job_start(struct amvdec_session *sess);
 void amvdec_m2m_job_finish(struct amvdec_session *sess);
+void amvdec_m2m_job_yield(struct amvdec_session *sess);
 void amvdec_m2m_retry_job(struct amvdec_session *sess);
 
 #endif
