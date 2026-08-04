@@ -450,6 +450,8 @@ int esparser_power_up(struct amvdec_session *sess)
 	amvdec_write_parser(core, PARSER_VIDEO_START_PTR, sess->vififo_paddr);
 	amvdec_write_parser(core, PARSER_VIDEO_END_PTR,
 			    sess->vififo_paddr + sess->vififo_size - 8);
+	if (sess->vififo_context_valid)
+		amvdec_write_parser(core, PARSER_VIDEO_WP, sess->vififo_wp);
 	amvdec_write_parser(core, PARSER_ES_CONTROL,
 			    amvdec_read_parser(core, PARSER_ES_CONTROL) & ~1);
 
