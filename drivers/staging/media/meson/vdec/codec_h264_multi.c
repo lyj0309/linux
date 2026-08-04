@@ -279,3 +279,91 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 
 	return 0;
 }
+
+static int h264_multi_mmco_param(const u16 *commands, unsigned int *pos,
+				 u16 *value)
+{
+	if (*pos >= H264_MULTI_LMEM_MMCO_CMD_WORDS)
+		return -EINVAL;
+
+	*value = commands[(*pos)++];
+	return 0;
+}
+
+int codec_h264_multi_parse_marking(struct amvdec_session *sess,
+				   struct h264_multi_marking *marking)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	const struct h264_multi_lmem_dpb *dpb;
+	const u16 *commands;
+	unsigned int pos = 0;
+	u16 nal_info;
+	u16 opcode;
+	int ret;
+
+	if (!h264 || !marking)
+		return -EINVAL;
+
+	memset(marking, 0, sizeof(*marking));
+	dpb = &h264->lmem.data.dpb;
+	commands = h264->lmem.data.mmco.commands;
+	nal_info = dpb->nal_info;
+
+	if ((nal_info & GENMASK(4, 0)) == 5) {
+		marking->long_term_reference = !!(commands[0] & BIT(0));
+		marking->no_output_of_prior_pics = !!(commands[0] & BIT(1));
+		return 0;
+	}
+
+	if (!FIELD_GET(GENMASK(6, 5), nal_info))
+		return 0;
+
+	while (pos < H264_MULTI_LMEM_MMCO_CMD_WORDS) {
+		struct h264_multi_mmco *op;
+
+		opcode = commands[pos++];
+		if (!opcode)
+			return 0;
+		if (opcode > 6 || marking->count == H264_MULTI_MAX_MMCO_OPS)
+			return -EINVAL;
+
+		op = &marking->ops[marking->count++];
+		op->opcode = opcode;
+		marking->adaptive = true;
+
+		switch (opcode) {
+		case 1:
+			ret = h264_multi_mmco_param(commands, &pos,
+						    &op->difference_of_pic_nums_minus1);
+			break;
+		case 2:
+			ret = h264_multi_mmco_param(commands, &pos,
+						    &op->long_term_pic_num);
+			break;
+		case 3:
+			ret = h264_multi_mmco_param(commands, &pos,
+						    &op->difference_of_pic_nums_minus1);
+			if (!ret)
+				ret = h264_multi_mmco_param(commands, &pos,
+							    &op->long_term_frame_idx);
+			break;
+		case 4:
+			ret = h264_multi_mmco_param(commands, &pos,
+						    &op->max_long_term_frame_idx_plus1);
+			break;
+		case 5:
+			ret = 0;
+			break;
+		case 6:
+			ret = h264_multi_mmco_param(commands, &pos,
+						    &op->long_term_frame_idx);
+			break;
+		default:
+			return -EINVAL;
+		}
+		if (ret)
+			return ret;
+	}
+
+	return -EINVAL;
+}
