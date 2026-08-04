@@ -53,6 +53,8 @@ void h264_multi_poc_commit(struct h264_multi_poc_state *state,
 			   const struct h264_multi_poc *poc,
 			   bool has_mmco5);
 void h264_multi_dpb_reset(struct h264_multi_dpb *dpb);
+int h264_multi_dpb_buf_count(const struct h264_multi_config *config,
+			     unsigned int *buf_count);
 int h264_multi_dpb_begin(struct h264_multi_dpb *dpb,
 			 const struct h264_multi_config *config,
 			 const struct h264_multi_picture *picture,
