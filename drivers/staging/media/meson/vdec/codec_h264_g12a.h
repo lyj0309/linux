@@ -97,7 +97,7 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 void codec_h264_multi_release_firmware(struct amvdec_session *sess);
 int codec_h264_multi_read_lmem(struct amvdec_session *sess);
 u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
-				       unsigned int index);
+			       unsigned int index);
 int codec_h264_multi_parse_config(struct amvdec_session *sess,
 				  u32 seq_info2, u32 seq_info, u32 crop_info,
 				  u32 param4,

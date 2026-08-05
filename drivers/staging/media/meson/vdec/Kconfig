@@ -15,5 +15,7 @@ config VIDEO_MESON_VDEC_KUNIT_TEST
 	depends on VIDEO_MESON_VDEC && KUNIT
 	default KUNIT_ALL_TESTS
 	help
-	  Run unit tests for the protocol and state handling used by the
-	  Amlogic video decoder.
+	  Build unit tests for the protocol and state handling used by the
+	  Amlogic video decoder. The tests cover H.264 picture order count,
+	  decoded picture buffer management and reference list construction.
+	  This option is intended for kernel developers.
