@@ -397,19 +397,28 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 
 void esparser_queue_all_src(struct work_struct *work)
 {
-	struct v4l2_m2m_buffer *buf, *n;
 	struct amvdec_session *sess =
 		container_of(work, struct amvdec_session, esparser_queue_work);
+	struct vb2_v4l2_buffer *vbuf;
+	int ret;
+	bool finish = false;
+
+	if (!atomic_read(&sess->m2m_job_running))
+		return;
 
 	mutex_lock(&sess->lock);
-	v4l2_m2m_for_each_src_buf_safe(sess->m2m_ctx, buf, n) {
-		if (sess->should_stop)
-			break;
-
-		if (esparser_queue(sess, &buf->vb) < 0)
-			break;
+	vbuf = v4l2_m2m_next_src_buf(sess->m2m_ctx);
+	if (sess->should_stop || !vbuf) {
+		finish = true;
+	} else {
+		ret = esparser_queue(sess, vbuf);
+		/* Only a full VIFIFO is retryable with the same source buffer. */
+		finish = ret != -EAGAIN;
 	}
 	mutex_unlock(&sess->lock);
+
+	if (finish)
+		amvdec_m2m_job_finish(sess);
 }
 
 int esparser_power_up(struct amvdec_session *sess)

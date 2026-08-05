@@ -334,8 +334,8 @@ static void dst_buf_done(struct amvdec_session *sess,
 	vbuf->field = field;
 	v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
 
-	/* Buffer done probably means the vififo got freed */
-	schedule_work(&sess->esparser_queue_work);
+	/* Buffer done probably means the vififo got freed. */
+	amvdec_m2m_retry_job(sess);
 }
 
 void amvdec_dst_buf_done(struct amvdec_session *sess,

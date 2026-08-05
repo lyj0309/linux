@@ -207,6 +207,7 @@ enum amvdec_status {
  * @pixelaspect: Pixel Aspect Ratio reported by the decoder
  * @esparser_queued_bufs: number of buffers currently queued into ESPARSER
  * @esparser_queue_work: work struct for the ESPARSER to process src buffers
+ * @m2m_job_running: whether this context currently owns the m2m scheduler
  * @streamon_cap: stream on flag for capture queue
  * @streamon_out: stream on flag for output queue
  * @sequence_cap: capture sequence counter
@@ -258,6 +259,7 @@ struct amvdec_session {
 
 	atomic_t esparser_queued_bufs;
 	struct work_struct esparser_queue_work;
+	atomic_t m2m_job_running;
 
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
@@ -295,5 +297,7 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+void amvdec_m2m_job_finish(struct amvdec_session *sess);
+void amvdec_m2m_retry_job(struct amvdec_session *sess);
 
 #endif
