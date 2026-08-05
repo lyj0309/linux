@@ -307,6 +307,8 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 			num_dst_bufs = codec_ops->num_pending_bufs(sess);
 
 		num_dst_bufs += v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx);
+		if (num_dst_bufs <= 3)
+			return -EAGAIN;
 		num_dst_bufs -= 3;
 
 		if (esparser_vififo_get_free_space(sess) < payload_size ||
