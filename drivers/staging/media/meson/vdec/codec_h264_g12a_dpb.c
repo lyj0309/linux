@@ -566,6 +566,7 @@ int h264_multi_dpb_picture_begin(struct h264_multi_dpb *dpb,
 	    !h264_multi_same_picture(&pic_state->picture, picture))
 		return -EPIPE;
 
+	pic_state->picture = *picture;
 	*action = H264_MULTI_SLICE_CONTINUE;
 	return 0;
 }
@@ -672,21 +673,25 @@ int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
 				   const struct h264_multi_picture *picture,
 				   struct v4l2_h264_reference *refs,
 				   unsigned int num_valid,
+				   unsigned int num_active,
 				   const u16 *commands,
 				   unsigned int num_commands)
 {
 	struct v4l2_h264_reference reordered[V4L2_H264_REF_LIST_LEN];
 	u32 pic_num_pred;
 	unsigned int ref_idx = 0;
+	unsigned int list_len;
 	unsigned int pos = 0;
 
 	if (!dpb || !config || !picture || !refs || !commands || !num_commands ||
-	    num_valid > ARRAY_SIZE(reordered))
+	    num_valid > ARRAY_SIZE(reordered) ||
+	    num_active > ARRAY_SIZE(reordered))
 		return -EINVAL;
 	if (!num_valid)
-		return commands[0] == 3 ? 0 : -EINVAL;
+		return !num_active && commands[0] == 3 ? 0 : -EINVAL;
 
 	pic_num_pred = picture->frame_num;
+	list_len = num_valid;
 	while (pos < num_commands) {
 		struct v4l2_h264_reference target;
 		unsigned int out;
@@ -695,8 +700,9 @@ int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
 		int ret;
 
 		if (idc == 3)
-			return 0;
-		if (idc > 2 || pos >= num_commands || ref_idx >= num_valid)
+			return list_len >= num_active ? 0 : -EINVAL;
+		if (idc > 2 || pos >= num_commands ||
+		    ref_idx >= ARRAY_SIZE(reordered))
 			return -EINVAL;
 		ret = h264_multi_dpb_reorder_target(dpb, config, picture, idc,
 						    commands[pos++],
@@ -704,17 +710,18 @@ int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
 		if (ret)
 			return ret;
 
+		/* A reference may be inserted again after the selected prefix. */
 		memcpy(reordered, refs, ref_idx * sizeof(*refs));
 		reordered[ref_idx] = target;
 		out = ref_idx + 1;
-		for (i = ref_idx; i < num_valid && out < num_valid; i++) {
+		for (i = ref_idx; i < list_len &&
+		     out < ARRAY_SIZE(reordered); i++) {
 			if (refs[i].index == target.index)
 				continue;
 			reordered[out++] = refs[i];
 		}
-		if (out != num_valid)
-			return -EINVAL;
-		memcpy(refs, reordered, num_valid * sizeof(*refs));
+		memcpy(refs, reordered, out * sizeof(*refs));
+		list_len = out;
 		ref_idx++;
 	}
 
