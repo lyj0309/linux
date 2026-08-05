@@ -773,6 +773,8 @@ static int codec_h264_multi_configure_mv(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	const struct h264_multi_dpb_slot *ref_slot;
 	dma_addr_t addr;
+	s64 bottom_delta;
+	s64 top_delta;
 	size_t offset;
 	size_t slot_size;
 	u16 mode_flags;
@@ -810,10 +812,11 @@ static int codec_h264_multi_configure_mv(struct amvdec_session *sess)
 	    ref_slot->buffer_index >= h264->capture_buf_count)
 		return -EINVAL;
 	addr = h264->mv_paddr + slot_size * ref_slot->buffer_index + offset;
-	ref_type = abs(h264->pic_state.poc.top -
-		       ref_slot->top_field_order_cnt) <
-		   abs(h264->pic_state.poc.top -
-		       ref_slot->bottom_field_order_cnt) ? 0 : 1;
+	top_delta = (s64)h264->pic_state.poc.top -
+		    ref_slot->top_field_order_cnt;
+	bottom_delta = (s64)h264->pic_state.poc.top -
+		       ref_slot->bottom_field_order_cnt;
+	ref_type = abs(top_delta) < abs(bottom_delta) ? 0 : 1;
 	amvdec_write_dos(core, H264_MULTI_CO_MB_RD_ADDR,
 			 (2 << 30) | (ref_type << 29) |
 			 ((addr >> 3) & GENMASK(28, 0)));
