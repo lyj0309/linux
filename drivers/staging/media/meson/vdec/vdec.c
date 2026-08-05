@@ -154,18 +154,49 @@ static void vdec_m2m_device_run(void *priv)
 {
 	struct amvdec_session *sess = priv;
 
+	atomic_set(&sess->m2m_job_running, 1);
 	schedule_work(&sess->esparser_queue_work);
+}
+
+void amvdec_m2m_job_finish(struct amvdec_session *sess)
+{
+	if (atomic_cmpxchg(&sess->m2m_job_running, 1, 0) != 1)
+		return;
+
+	v4l2_m2m_job_finish(sess->core->m2m_dev, sess->m2m_ctx);
+}
+
+void amvdec_m2m_retry_job(struct amvdec_session *sess)
+{
+	if (atomic_read(&sess->m2m_job_running))
+		schedule_work(&sess->esparser_queue_work);
 }
 
 static void vdec_m2m_job_abort(void *priv)
 {
 	struct amvdec_session *sess = priv;
 
-	v4l2_m2m_job_finish(sess->core->m2m_dev, sess->m2m_ctx);
+	cancel_work_sync(&sess->esparser_queue_work);
+	amvdec_m2m_job_finish(sess);
+}
+
+static int vdec_m2m_job_ready(void *priv)
+{
+	struct amvdec_session *sess = priv;
+
+	if (!sess->streamon_out)
+		return 0;
+
+	if (sess->status == STATUS_INIT && !sess->streamon_cap)
+		return 1;
+
+	return sess->streamon_cap &&
+		v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) > 0;
 }
 
 static const struct v4l2_m2m_ops vdec_m2m_ops = {
 	.device_run = vdec_m2m_device_run,
+	.job_ready = vdec_m2m_job_ready,
 	.job_abort = vdec_m2m_job_abort,
 };
 
@@ -283,7 +314,6 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 	    vdec_codec_needs_recycle(sess))
 		vdec_queue_recycle(sess, vb);
 
-	schedule_work(&sess->esparser_queue_work);
 }
 
 static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
@@ -355,7 +385,6 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	spin_lock_irq(&core->irq_lock);
 	core->cur_sess = sess;
 	spin_unlock_irq(&core->irq_lock);
-	schedule_work(&sess->esparser_queue_work);
 	goto unlock_ok;
 
 vififo_free:
@@ -905,6 +934,8 @@ static int vdec_open(struct file *file)
 		ret = PTR_ERR(sess->m2m_ctx);
 		goto err_free_sess;
 	}
+	sess->m2m_ctx->ignore_cap_streaming = true;
+	sess->m2m_ctx->cap_q_ctx.buffered = true;
 
 	ret = vdec_init_ctrls(sess);
 	if (ret)
@@ -921,6 +952,7 @@ static int vdec_open(struct file *file)
 	INIT_LIST_HEAD(&sess->timestamps);
 	INIT_LIST_HEAD(&sess->bufs_recycle);
 	INIT_WORK(&sess->esparser_queue_work, esparser_queue_all_src);
+	atomic_set(&sess->m2m_job_running, 0);
 	mutex_init(&sess->lock);
 	mutex_init(&sess->bufs_recycle_lock);
 	spin_lock_init(&sess->ts_spinlock);
@@ -944,6 +976,7 @@ static int vdec_close(struct file *file)
 	struct amvdec_session *sess = file_to_amvdec_session(file);
 
 	v4l2_m2m_ctx_release(sess->m2m_ctx);
+	cancel_work_sync(&sess->esparser_queue_work);
 	v4l2_fh_del(&sess->fh, file);
 	v4l2_fh_exit(&sess->fh);
 
