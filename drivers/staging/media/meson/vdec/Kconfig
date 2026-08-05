@@ -17,5 +17,6 @@ config VIDEO_MESON_VDEC_KUNIT_TEST
 	help
 	  Build unit tests for the protocol and state handling used by the
 	  Amlogic video decoder. The tests cover H.264 picture order count,
-	  decoded picture buffer management and reference list construction.
-	  This option is intended for kernel developers.
+	  decoded picture buffer management, reference list construction and
+	  VP9 superframe validation. This option is intended for kernel
+	  developers.

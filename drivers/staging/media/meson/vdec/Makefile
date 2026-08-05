@@ -7,5 +7,6 @@ meson-vdec-objs += codec_mpeg12.o codec_h264.o codec_h264_g12a.o
 meson-vdec-objs += codec_h264_g12a_dpb.o
 meson-vdec-objs += codec_hevc_common.o codec_vp9.o codec_hevc.o
 meson-vdec-$(CONFIG_VIDEO_MESON_VDEC_KUNIT_TEST) += codec_h264_g12a_dpb_test.o
+meson-vdec-$(CONFIG_VIDEO_MESON_VDEC_KUNIT_TEST) += esparser_test.o
 
 obj-$(CONFIG_VIDEO_MESON_VDEC) += meson-vdec.o
