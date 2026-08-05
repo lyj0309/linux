@@ -8,6 +8,7 @@
 
 #include <linux/firmware.h>
 #include <linux/clk.h>
+#include <linux/iopoll.h>
 
 #include "vdec_1.h"
 #include "vdec_helpers.h"
@@ -28,11 +29,12 @@ static int vdec_hevc_load_firmware(struct amvdec_session *sess,
 {
 	struct amvdec_core *core = sess->core;
 	struct device *dev = core->dev_dec;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	const struct firmware *fw;
-	static void *mc_addr;
-	static dma_addr_t mc_addr_map;
+	dma_addr_t mc_addr_map;
+	void *mc_addr;
 	int ret;
-	u32 i = 100;
+	u32 val;
 
 	ret = request_firmware(&fw, fwname, dev);
 	if (ret < 0)  {
@@ -63,13 +65,12 @@ static int vdec_hevc_load_firmware(struct amvdec_session *sess,
 	amvdec_write_dos(core, HEVC_IMEM_DMA_COUNT, MC_SIZE / 4);
 	amvdec_write_dos(core, HEVC_IMEM_DMA_CTRL, (0x8000 | (7 << 16)));
 
-	while (i && (readl(core->dos_base + HEVC_IMEM_DMA_CTRL) & 0x8000))
-		i--;
-
-	if (i == 0) {
+	ret = readl_poll_timeout(core->dos_base + HEVC_IMEM_DMA_CTRL, val,
+				 !(val & BIT(15)), 10, USEC_PER_SEC);
+	if (ret)
 		dev_err(dev, "Firmware load fail (DMA hang?)\n");
-		ret = -ENODEV;
-	}
+	else if (codec_ops->prepare_firmware)
+		ret = codec_ops->prepare_firmware(sess, fw->data, fw->size);
 
 	dma_free_coherent(core->dev, MC_SIZE, mc_addr, mc_addr_map);
 release_firmware:
