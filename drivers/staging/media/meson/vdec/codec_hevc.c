@@ -113,6 +113,9 @@
 #define HEVC_DECPIC_DATA_ERROR               0xb
 #define HEVC_SEI_DAT                         0xc
 #define HEVC_SEI_DAT_DONE                    0xd
+#define HEVC_DECODE_BUFEMPTY                 0x20
+#define HEVC_SEARCH_BUFEMPTY                 0x22
+#define HEVC_DECODE_BUFEMPTY2                0x24
 
 /* RPM misc_flag0 */
 #define PCM_LOOP_FILTER_DISABLED_FLAG_BIT		0
@@ -224,6 +227,8 @@ struct hevc_frame {
 	struct list_head list;
 	struct vb2_v4l2_buffer *vbuf;
 	u32 offset;
+	struct amvdec_timestamp_info timestamp;
+	bool timestamp_valid;
 	u32 poc;
 
 	int referenced;
@@ -284,8 +289,12 @@ struct codec_hevc {
 	u32 slice_segment_addr;
 	u32 slice_addr;
 	u32 ldc_flag;
+	u32 input_size;
 	u8 start_decoding_flag;
 	u8 rps_set_id;
+	bool input_has_frame;
+	bool input_pending;
+	bool waiting_for_input;
 
 	/* Whether we detected the bitstream as 10-bit */
 	int is_10bit;
@@ -526,8 +535,12 @@ static void codec_hevc_show_frames(struct amvdec_session *sess)
 
 		dev_dbg(sess->core->dev, "DONE frame poc %u; vbuf %u\n",
 			tmp->poc, tmp->vbuf->vb2_buf.index);
-		amvdec_dst_buf_done_offset(sess, tmp->vbuf, tmp->offset,
-					   V4L2_FIELD_NONE, 0, false);
+		if (tmp->timestamp_valid)
+			amvdec_dst_buf_done_ts(sess, tmp->vbuf, V4L2_FIELD_NONE,
+					       0, &tmp->timestamp);
+		else
+			amvdec_dst_buf_done_offset(sess, tmp->vbuf, tmp->offset,
+						   V4L2_FIELD_NONE, 0, false);
 
 		tmp->show = 0;
 		hevc->frames_num--;
@@ -724,7 +737,11 @@ static void codec_hevc_flush_output(struct amvdec_session *sess)
 	struct hevc_frame *tmp, *n;
 
 	while ((tmp = codec_hevc_get_next_ready_frame(hevc))) {
-		amvdec_dst_buf_done(sess, tmp->vbuf, V4L2_FIELD_NONE, 0);
+		if (tmp->timestamp_valid)
+			amvdec_dst_buf_done_ts(sess, tmp->vbuf, V4L2_FIELD_NONE,
+					       0, &tmp->timestamp);
+		else
+			amvdec_dst_buf_done(sess, tmp->vbuf, V4L2_FIELD_NONE, 0);
 		tmp->show = 0;
 		hevc->frames_num--;
 	}
@@ -869,7 +886,21 @@ codec_hevc_prepare_new_frame(struct amvdec_session *sess)
 	new_frame->poc = hevc->curr_poc;
 	new_frame->cur_slice_type = params->p.slice_type;
 	new_frame->num_reorder_pic = params->p.sps_num_reorder_pics_0;
-	new_frame->offset = amvdec_read_dos(core, HEVC_SHIFT_BYTE_COUNT);
+	if (sess->fmt_out->codec_ops->irq == AMVDEC_IRQ_MBOX0) {
+		if (amvdec_take_ts(sess, &new_frame->timestamp)) {
+			dev_err(core->dev_dec,
+				"No timestamp for capture buffer %u\n",
+				vbuf->vb2_buf.index);
+			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+			kfree(new_frame);
+			return NULL;
+		}
+		new_frame->timestamp_valid = true;
+		hevc->input_has_frame = true;
+	} else {
+		new_frame->offset = amvdec_read_dos(core,
+						    HEVC_SHIFT_BYTE_COUNT);
+	}
 
 	list_add_tail(&new_frame->list, &hevc->ref_frames_list);
 	hevc->frames_num++;
@@ -1541,6 +1572,94 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 		amvdec_abort(sess);
 }
 
+static void codec_hevc_start_cpu(struct amvdec_core *core)
+{
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_write_dos(core, DOS_SW_RESET3, BIT(12) | BIT(11));
+	amvdec_write_dos(core, DOS_SW_RESET3, 0);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_write_dos_bits(core, HEVC_WRRSP_LMEM, 7 << 25);
+	amvdec_write_dos(core, HEVC_MPSR, 1);
+}
+
+static void codec_hevc_run(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+
+	if (!hevc)
+		return;
+	if (!READ_ONCE(hevc->input_pending)) {
+		WRITE_ONCE(hevc->waiting_for_input, true);
+		return;
+	}
+
+	amvdec_write_dos(sess->core, HEVC_WAIT_FLAG, 0);
+	amvdec_write_dos(sess->core, HEVC_SHIFT_BYTE_COUNT, 0);
+	amvdec_write_dos(sess->core, HEVC_DECODE_SIZE, hevc->input_size);
+	amvdec_write_dos(sess->core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
+	codec_hevc_start_cpu(sess->core);
+}
+
+static void
+codec_hevc_input_queued(struct amvdec_session *sess, u32 payload_size)
+{
+	struct codec_hevc *hevc = sess->priv;
+
+	if (!hevc)
+		return;
+
+	hevc->input_has_frame = false;
+	hevc->input_size = payload_size;
+	WRITE_ONCE(hevc->input_pending, true);
+	if (!READ_ONCE(hevc->waiting_for_input))
+		return;
+
+	WRITE_ONCE(hevc->waiting_for_input, false);
+	amvdec_write_dos(sess->core, HEVC_WAIT_FLAG, 0);
+	amvdec_write_dos(sess->core, HEVC_SHIFT_BYTE_COUNT, 0);
+	amvdec_write_dos(sess->core, HEVC_DECODE_SIZE, payload_size);
+	amvdec_write_dos(sess->core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
+	codec_hevc_start_cpu(sess->core);
+}
+
+static bool codec_hevc_can_queue_input(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+
+	return hevc && !READ_ONCE(hevc->input_pending);
+}
+
+static void codec_hevc_finish_job(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+	struct amvdec_timestamp_info timestamp;
+	u32 decode_info;
+	bool last_input;
+
+	decode_info = amvdec_read_dos(sess->core, HEVC_RPM_BUFFER);
+	hevc->start_decoding_flag |= decode_info & 0xff;
+	hevc->rps_set_id = (decode_info >> 8) & 0xff;
+	WRITE_ONCE(hevc->input_pending, false);
+	if (!hevc->input_has_frame && !amvdec_take_ts(sess, &timestamp))
+		atomic_dec_if_positive(&sess->esparser_queued_bufs);
+	codec_hevc_show_frames(sess);
+
+	last_input = sess->draining &&
+		!v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx);
+	if (last_input) {
+		sess->should_stop = 1;
+		codec_hevc_flush_output(sess);
+		v4l2_m2m_mark_stopped(sess->m2m_ctx);
+		sess->draining = false;
+	}
+
+	amvdec_m2m_job_yield(sess);
+}
+
 static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -1551,6 +1670,14 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		return IRQ_HANDLED;
 
 	mutex_lock(&hevc->lock);
+	if (sess->fmt_out->codec_ops->irq == AMVDEC_IRQ_MBOX0 &&
+	    (dec_status == HEVC_DECPIC_DATA_DONE ||
+	     dec_status == HEVC_DECODE_BUFEMPTY ||
+	     dec_status == HEVC_SEARCH_BUFEMPTY ||
+	     dec_status == HEVC_DECODE_BUFEMPTY2)) {
+		codec_hevc_finish_job(sess);
+		goto unlock;
+	}
 	if (dec_status != HEVC_SLICE_SEGMENT_DONE) {
 		dev_err(core->dev_dec, "Unrecognized dec_status: %08X\n",
 			dec_status);
@@ -1577,6 +1704,11 @@ unlock:
 
 static irqreturn_t codec_hevc_isr(struct amvdec_session *sess)
 {
+	if (sess->fmt_out->codec_ops->irq == AMVDEC_IRQ_MBOX0)
+		amvdec_write_dos(sess->core, HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	else
+		amvdec_write_dos(sess->core, HEVC_ASSIST_MBOX1_CLR_REG, 1);
+
 	return IRQ_WAKE_THREAD;
 }
 
@@ -1592,6 +1724,9 @@ struct amvdec_codec_ops codec_hevc_ops = {
 
 struct amvdec_codec_ops codec_hevc_g12a_ops = {
 	.start = codec_hevc_start,
+	.run = codec_hevc_run,
+	.input_queued = codec_hevc_input_queued,
+	.can_queue_input = codec_hevc_can_queue_input,
 	.async_drain = true,
 	.stop = codec_hevc_keep_context,
 	.release = codec_hevc_release,
