@@ -50,32 +50,40 @@ void amvdec_write_parser(struct amvdec_core *core, u32 reg, u32 val)
 }
 EXPORT_SYMBOL_GPL(amvdec_write_parser);
 
-/* 4 KiB per 64x32 block */
-u32 amvdec_am21c_body_size(u32 width, u32 height)
+/* AMFBC body is made out of 64x32 blocks with varying block size */
+u32 amvdec_amfbc_body_size(u32 width, u32 height, u32 is_10bit, u32 use_mmu)
 {
 	u32 width_64 = ALIGN(width, 64) / 64;
 	u32 height_32 = ALIGN(height, 32) / 32;
+	u32 blk_size = 4096;
 
-	return SZ_4K * width_64 * height_32;
+	if (!is_10bit) {
+		if (use_mmu)
+			blk_size = 3200;
+		else
+			blk_size = 3072;
+	}
+
+	return blk_size * width_64 * height_32;
 }
-EXPORT_SYMBOL_GPL(amvdec_am21c_body_size);
+EXPORT_SYMBOL_GPL(amvdec_amfbc_body_size);
 
 /* 32 bytes per 128x64 block */
-u32 amvdec_am21c_head_size(u32 width, u32 height)
+u32 amvdec_amfbc_head_size(u32 width, u32 height)
 {
 	u32 width_128 = ALIGN(width, 128) / 128;
 	u32 height_64 = ALIGN(height, 64) / 64;
 
 	return 32 * width_128 * height_64;
 }
-EXPORT_SYMBOL_GPL(amvdec_am21c_head_size);
+EXPORT_SYMBOL_GPL(amvdec_amfbc_head_size);
 
-u32 amvdec_am21c_size(u32 width, u32 height)
+u32 amvdec_amfbc_size(u32 width, u32 height, u32 is_10bit, u32 use_mmu)
 {
-	return ALIGN(amvdec_am21c_body_size(width, height) +
-		     amvdec_am21c_head_size(width, height), SZ_64K);
+	return ALIGN(amvdec_amfbc_body_size(width, height, is_10bit, use_mmu) +
+		     amvdec_amfbc_head_size(width, height), SZ_64K);
 }
-EXPORT_SYMBOL_GPL(amvdec_am21c_size);
+EXPORT_SYMBOL_GPL(amvdec_amfbc_size);
 
 static int canvas_alloc(struct amvdec_session *sess, u8 *canvas_id)
 {
@@ -272,7 +280,7 @@ EXPORT_SYMBOL_GPL(amvdec_remove_ts);
 
 static void dst_buf_done(struct amvdec_session *sess,
 			 struct vb2_v4l2_buffer *vbuf,
-			 u32 field, u64 timestamp,
+			 u32 field, u32 type, u64 timestamp,
 			 struct v4l2_timecode timecode, u32 flags)
 {
 	struct device *dev = sess->core->dev_dec;
@@ -295,6 +303,15 @@ static void dst_buf_done(struct amvdec_session *sess,
 	vbuf->flags = flags;
 	vbuf->timecode = timecode;
 
+	if (type == 1)
+		vbuf->flags |= V4L2_BUF_FLAG_KEYFRAME;
+	else if (type == 2)
+		vbuf->flags |= V4L2_BUF_FLAG_PFRAME;
+	else if (type == 3)
+		vbuf->flags |= V4L2_BUF_FLAG_BFRAME;
+	else if (type == 4)
+		vbuf->flags |= V4L2_BUF_FLAG_KEYFRAME;
+
 	if (sess->should_stop &&
 	    atomic_read(&sess->esparser_queued_bufs) <= 1) {
 		const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
@@ -303,13 +320,14 @@ static void dst_buf_done(struct amvdec_session *sess,
 			sess->sequence_cap - 1);
 		v4l2_event_queue_fh(&sess->fh, &ev);
 		vbuf->flags |= V4L2_BUF_FLAG_LAST;
+	} else if (sess->should_stop) {
+		dev_dbg(dev, "EOS pending: %d parser buffers\n",
+			 atomic_read(&sess->esparser_queued_bufs));
 	} else if (sess->status == STATUS_NEEDS_RESUME) {
 		/* Mark LAST for drained show frames during a source change */
 		vbuf->flags |= V4L2_BUF_FLAG_LAST;
 		sess->sequence_cap = 0;
-	} else if (sess->should_stop)
-		dev_dbg(dev, "should_stop, %u bufs remain\n",
-			atomic_read(&sess->esparser_queued_bufs));
+	}
 
 	dev_dbg(dev, "Buffer %u done, ts = %llu, flags = %08X\n",
 		vbuf->vb2_buf.index, timestamp, flags);
@@ -321,7 +339,7 @@ static void dst_buf_done(struct amvdec_session *sess,
 }
 
 void amvdec_dst_buf_done(struct amvdec_session *sess,
-			 struct vb2_v4l2_buffer *vbuf, u32 field)
+			 struct vb2_v4l2_buffer *vbuf, u32 field, u32 type)
 {
 	struct device *dev = sess->core->dev_dec;
 	struct amvdec_timestamp *tmp;
@@ -349,14 +367,14 @@ void amvdec_dst_buf_done(struct amvdec_session *sess,
 	kfree(tmp);
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
 
-	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
+	dst_buf_done(sess, vbuf, field, type, timestamp, timecode, vbuf_flags);
 	atomic_dec(&sess->esparser_queued_bufs);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done);
 
 void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 				struct vb2_v4l2_buffer *vbuf,
-				u32 offset, u32 field, bool allow_drop)
+				u32 offset, u32 field, u32 type, bool allow_drop)
 {
 	struct device *dev = sess->core->dev_dec;
 	struct amvdec_timestamp *match = NULL;
@@ -370,7 +388,16 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 
 	/* Look for our vififo offset to get the corresponding timestamp. */
 	list_for_each_entry_safe(tmp, n, &sess->timestamps, list) {
-		if (tmp->offset > offset) {
+		s64 delta = (s64)offset - tmp->offset;
+
+		/* Offsets reported by codecs usually differ slightly,
+		 * so we need some wiggle room.
+		 * 4KiB being the minimum packet size, there is no risk here.
+		 */
+		if (delta > (-1 * (s32)SZ_4K) && delta < SZ_4K) {
+			match = tmp;
+			break;
+		} else {
 			/*
 			 * Delete any record that remained unused for 32 match
 			 * checks
@@ -379,10 +406,7 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 				list_del(&tmp->list);
 				kfree(tmp);
 			}
-			break;
 		}
-
-		match = tmp;
 	}
 
 	if (!match) {
@@ -397,14 +421,14 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 	}
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
 
-	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
+	dst_buf_done(sess, vbuf, field, type, timestamp, timecode, vbuf_flags);
 	if (match)
 		atomic_dec(&sess->esparser_queued_bufs);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_offset);
 
 void amvdec_dst_buf_done_idx(struct amvdec_session *sess,
-			     u32 buf_idx, u32 offset, u32 field)
+			     u32 buf_idx, u32 offset, u32 field, u32 type)
 {
 	struct vb2_v4l2_buffer *vbuf;
 	struct device *dev = sess->core->dev_dec;
@@ -420,9 +444,9 @@ void amvdec_dst_buf_done_idx(struct amvdec_session *sess,
 	}
 
 	if (offset != -1)
-		amvdec_dst_buf_done_offset(sess, vbuf, offset, field, true);
+		amvdec_dst_buf_done_offset(sess, vbuf, offset, field, type, true);
 	else
-		amvdec_dst_buf_done(sess, vbuf, field);
+		amvdec_dst_buf_done(sess, vbuf, field, type);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_idx);
 
@@ -440,7 +464,7 @@ void amvdec_set_par_from_dar(struct amvdec_session *sess,
 EXPORT_SYMBOL_GPL(amvdec_set_par_from_dar);
 
 void amvdec_src_change(struct amvdec_session *sess, u32 width,
-		       u32 height, u32 dpb_size)
+		       u32 height, u32 dpb_size, u32 bitdepth)
 {
 	static const struct v4l2_event ev = {
 		.type = V4L2_EVENT_SOURCE_CHANGE,
@@ -448,25 +472,27 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, dpb_size);
 
+	sess->bitdepth = bitdepth;
+
 	/*
 	 * Check if the capture queue is already configured well for our
-	 * usecase. If so, keep decoding with it and do not send the event
+	 * usecase. If so, keep decoding with it.
 	 */
 	if (sess->streamon_cap &&
 	    sess->width == width &&
 	    sess->height == height &&
 	    dpb_size <= sess->num_dst_bufs) {
 		sess->fmt_out->codec_ops->resume(sess);
-		return;
+	} else {
+		sess->status = STATUS_NEEDS_RESUME;
+		sess->changed_format = 0;
 	}
 
-	sess->changed_format = 0;
 	sess->width = width;
 	sess->height = height;
-	sess->status = STATUS_NEEDS_RESUME;
 
-	dev_dbg(sess->core->dev, "Res. changed (%ux%u), DPB size %u\n",
-		width, height, dpb_size);
+	dev_dbg(sess->core->dev, "Res. changed (%ux%u), DPB %u, bitdepth %u\n",
+		width, height, dpb_size, bitdepth);
 	v4l2_event_queue_fh(&sess->fh, &ev);
 }
 EXPORT_SYMBOL_GPL(amvdec_src_change);
