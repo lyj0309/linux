@@ -1383,27 +1383,34 @@ static void codec_vp9_fetch_rpm(struct amvdec_session *sess)
 			vp9->rpm_param.l.data[i + j] = rpm_vaddr[i + 3 - j];
 }
 
-static int codec_vp9_process_rpm(struct codec_vp9 *vp9)
+static int codec_vp9_process_rpm(struct amvdec_session *sess)
 {
+	struct codec_vp9 *vp9 = sess->priv;
 	union rpm_param *param = &vp9->rpm_param;
-	int src_changed = 0;
-	int is_10bit = 0;
-	int pic_width_64 = ALIGN(param->p.width, 64);
-	int pic_height_32 = ALIGN(param->p.height, 32);
-	int pic_width_lcu  = (pic_width_64 % LCU_SIZE) ?
-				pic_width_64 / LCU_SIZE  + 1
-				: pic_width_64 / LCU_SIZE;
-	int pic_height_lcu = (pic_height_32 % LCU_SIZE) ?
-				pic_height_32 / LCU_SIZE + 1
-				: pic_height_32 / LCU_SIZE;
+	unsigned int pic_width_lcu;
+	unsigned int pic_height_lcu;
+	bool is_10bit;
+	int src_changed;
+
+	if (!param->p.width || !param->p.height ||
+	    param->p.width > sess->fmt_out->max_width ||
+	    param->p.height > sess->fmt_out->max_height ||
+	    param->p.profile > 3 ||
+	    (param->p.bit_depth != 8 && param->p.bit_depth != 10) ||
+	    param->p.frame_type >= FRAME_TYPES ||
+	    param->p.refresh_frame_flags >= BIT(REF_FRAMES) ||
+	    param->p.filter_level > MAX_LOOP_FILTER ||
+	    param->p.sharpness_level > 7)
+		return -EINVAL;
+
+	is_10bit = param->p.bit_depth == 10;
+	pic_width_lcu = DIV_ROUND_UP(param->p.width, LCU_SIZE);
+	pic_height_lcu = DIV_ROUND_UP(param->p.height, LCU_SIZE);
 	vp9->lcu_total = pic_width_lcu * pic_height_lcu;
 
-	if (param->p.bit_depth == 10)
-		is_10bit = 1;
-
-	if (vp9->width != param->p.width || vp9->height != param->p.height ||
-	    vp9->is_10bit != is_10bit)
-		src_changed = 1;
+	src_changed = vp9->width != param->p.width ||
+		      vp9->height != param->p.height ||
+		      vp9->is_10bit != is_10bit;
 
 	vp9->width = param->p.width;
 	vp9->height = param->p.height;
@@ -2093,7 +2100,7 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 	struct codec_vp9 *vp9 = sess->priv;
 	u32 dec_status = amvdec_read_dos(core, VP9_DEC_STATUS_REG);
 	u32 prob_status = amvdec_read_dos(core, VP9_ADAPT_PROB_REG);
-	int i;
+	int ret, i;
 
 	if (!vp9)
 		return IRQ_HANDLED;
@@ -2141,7 +2148,14 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 	codec_vp9_update_ref(vp9);
 
 	codec_vp9_fetch_rpm(sess);
-	if (codec_vp9_process_rpm(vp9)) {
+	ret = codec_vp9_process_rpm(sess);
+	if (ret < 0) {
+		dev_err(core->dev_dec, "Invalid VP9 frame metadata\n");
+		amvdec_abort(sess);
+		goto unlock;
+	}
+
+	if (ret > 0) {
 		amvdec_src_change(sess, vp9->width, vp9->height, 16,
 				  vp9->is_10bit ? 10 : 8);
 
