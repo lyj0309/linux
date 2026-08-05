@@ -8,6 +8,7 @@
 #define __MESON_VDEC_CORE_H_
 
 #include <linux/irqreturn.h>
+#include <linux/wait.h>
 #include <linux/regmap.h>
 #include <linux/list.h>
 #include <media/videobuf2-v4l2.h>
@@ -65,6 +66,8 @@ struct amvdec_session;
  * @vdev_dec: video device for the decoder
  * @v4l2_dev: v4l2 device
  * @m2m_dev: device-level v4l2 memory-to-memory scheduler
+ * @esparser_wq: wait queue for parser fetch completion
+ * @esparser_search_done: parser fetch completion flag
  * @cur_sess: current decoding session
  * @lock: video device lock
  * @hw_lock: serializes decoder hardware ownership transitions
@@ -93,6 +96,8 @@ struct amvdec_core {
 	struct video_device *vdev_dec;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev;
+	wait_queue_head_t esparser_wq;
+	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
 	struct mutex lock;

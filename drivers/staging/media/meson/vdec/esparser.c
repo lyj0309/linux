@@ -53,9 +53,6 @@
 #define SEARCH_PATTERN_LEN	512
 #define VP9_HEADER_SIZE		16
 
-static DECLARE_WAIT_QUEUE_HEAD(wq);
-static int search_done;
-
 static irqreturn_t esparser_isr(int irq, void *dev)
 {
 	int int_status;
@@ -67,8 +64,8 @@ static irqreturn_t esparser_isr(int irq, void *dev)
 	if (int_status & PARSER_INTSTAT_SC_FOUND) {
 		amvdec_write_parser(core, PFIFO_RD_PTR, 0);
 		amvdec_write_parser(core, PFIFO_WR_PTR, 0);
-		search_done = 1;
-		wake_up_interruptible(&wq);
+		WRITE_ONCE(core->esparser_search_done, true);
+		wake_up_interruptible(&core->esparser_wq);
 	}
 
 	return IRQ_HANDLED;
@@ -208,12 +205,14 @@ esparser_write_data(struct amvdec_core *core, dma_addr_t addr, u32 size)
 			    (size << ES_PACK_SIZE_BIT));
 
 	amvdec_write_parser(core, PARSER_FETCH_ADDR, addr);
+	WRITE_ONCE(core->esparser_search_done, false);
 	amvdec_write_parser(core, PARSER_FETCH_CMD,
-			    (7 << FETCH_ENDIAN_BIT) |
-			    (size + SEARCH_PATTERN_LEN));
+				    (7 << FETCH_ENDIAN_BIT) |
+				    (size + SEARCH_PATTERN_LEN));
 
-	search_done = 0;
-	return wait_event_interruptible_timeout(wq, search_done, (HZ / 5));
+	return wait_event_interruptible_timeout(core->esparser_wq,
+						READ_ONCE(core->esparser_search_done),
+						HZ / 5);
 }
 
 static u32 esparser_vififo_get_free_space(struct amvdec_session *sess)
@@ -469,6 +468,8 @@ int esparser_init(struct platform_device *pdev, struct amvdec_core *core)
 	struct device *dev = &pdev->dev;
 	int ret;
 	int irq;
+
+	init_waitqueue_head(&core->esparser_wq);
 
 	irq = platform_get_irq_byname(pdev, "esparser");
 	if (irq < 0)
