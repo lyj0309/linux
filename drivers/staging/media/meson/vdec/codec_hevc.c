@@ -1580,7 +1580,9 @@ static int codec_hevc_process_rpm(struct amvdec_session *sess)
 	struct codec_hevc *hevc = sess->priv;
 	union rpm_param *param = &hevc->rpm_param;
 	int src_changed = 0;
+	u32 crop_width, crop_height;
 	u32 dst_width, dst_height;
+	u32 log2_lcu_size;
 	u32 dpb_size = 16;
 	u32 lcu_size;
 	u32 is_10bit = 0;
@@ -1593,6 +1595,12 @@ static int codec_hevc_process_rpm(struct amvdec_session *sess)
 	if (param->p.bit_depth)
 		is_10bit = 1;
 
+	if (param->p.pic_width_in_luma_samples > sess->fmt_out->max_width ||
+	    param->p.pic_height_in_luma_samples > sess->fmt_out->max_height ||
+	    param->p.chroma_format_idc > 3 ||
+	    param->p.log2_max_pic_order_cnt_lsb_minus4 > 12)
+		return -EINVAL;
+
 	hevc->width = param->p.pic_width_in_luma_samples;
 	hevc->height = param->p.pic_height_in_luma_samples;
 	dst_width = hevc->width;
@@ -1604,8 +1612,11 @@ static int codec_hevc_process_rpm(struct amvdec_session *sess)
 				 sess->fmt_out->max_buffers);
 	}
 
-	lcu_size = 1 << (param->p.log2_min_coding_block_size_minus3 +
-		   3 + param->p.log2_diff_max_min_coding_block_size);
+	log2_lcu_size = param->p.log2_min_coding_block_size_minus3 + 3 +
+			param->p.log2_diff_max_min_coding_block_size;
+	if (log2_lcu_size < 4 || log2_lcu_size > 6)
+		return -EINVAL;
+	lcu_size = BIT(log2_lcu_size);
 
 	hevc->lcu_x_num = (hevc->width + lcu_size - 1) / lcu_size;
 	hevc->lcu_y_num = (hevc->height + lcu_size - 1) / lcu_size;
@@ -1623,12 +1634,14 @@ static int codec_hevc_process_rpm(struct amvdec_session *sess)
 			break;
 		}
 
-		dst_width -= sub_width *
-			     (param->p.conf_win_left_offset +
-			      param->p.conf_win_right_offset);
-		dst_height -= sub_height *
-			      (param->p.conf_win_top_offset +
-			       param->p.conf_win_bottom_offset);
+		crop_width = sub_width * (param->p.conf_win_left_offset +
+					  param->p.conf_win_right_offset);
+		crop_height = sub_height * (param->p.conf_win_top_offset +
+					    param->p.conf_win_bottom_offset);
+		if (crop_width >= dst_width || crop_height >= dst_height)
+			return -EINVAL;
+		dst_width -= crop_width;
+		dst_height -= crop_height;
 	}
 
 	if (dst_width != hevc->dst_width ||
@@ -1824,6 +1837,7 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct codec_hevc *hevc = sess->priv;
 	u32 dec_status = amvdec_read_dos(core, HEVC_DEC_STATUS_REG);
+	int ret;
 
 	if (!hevc)
 		return IRQ_HANDLED;
@@ -1846,7 +1860,12 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 
 	sess->keyframe_found = 1;
 	codec_hevc_fetch_rpm(sess);
-	if (codec_hevc_process_rpm(sess)) {
+	ret = codec_hevc_process_rpm(sess);
+	if (ret < 0) {
+		amvdec_abort(sess);
+		goto unlock;
+	}
+	if (ret > 0) {
 		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height,
 				  hevc->dpb_size,
 				  hevc->is_10bit ? 10 : 8);
