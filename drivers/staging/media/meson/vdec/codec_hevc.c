@@ -1638,6 +1638,7 @@ static void codec_hevc_fetch_rpm(struct amvdec_session *sess)
 	u16 raw[RPM_SIZE];
 	int i, j;
 
+	dma_rmb();
 	for (i = 0; i < RPM_SIZE; i += 4) {
 		for (j = 0; j < 4; j++)
 			raw[i + j] = rpm_vaddr[i + 3 - j];
