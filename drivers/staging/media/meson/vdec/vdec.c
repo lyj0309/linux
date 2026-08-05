@@ -267,6 +267,26 @@ void amvdec_m2m_retry_job(struct amvdec_session *sess)
 		schedule_work(&sess->esparser_queue_work);
 }
 
+void amvdec_m2m_finish_drain(struct amvdec_session *sess)
+{
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+
+	sess->draining = false;
+	sess->should_stop = 1;
+	v4l2_m2m_mark_stopped(sess->m2m_ctx);
+
+	if (codec_ops->drain) {
+		vdec_wait_inactive(sess);
+		codec_ops->drain(sess);
+	} else if (codec_ops->eos_sequence) {
+		u32 len;
+		const u8 *data = codec_ops->eos_sequence(&len);
+
+		esparser_queue_eos(sess->core, data, len);
+		vdec_wait_inactive(sess);
+	}
+}
+
 static void vdec_m2m_job_abort(void *priv)
 {
 	struct amvdec_session *sess = priv;
@@ -916,45 +936,38 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	if (ret)
 		return ret;
 
+	mutex_lock(&sess->lock);
 	if (!(sess->streamon_out & sess->streamon_cap))
-		return 0;
+		goto unlock;
 
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
 		v4l2_m2m_clear_state(sess->m2m_ctx);
 		sess->should_stop = 0;
 		sess->draining = false;
-		return 0;
+		goto unlock;
 	}
 
 	/* Should not happen */
-	if (cmd->cmd != V4L2_DEC_CMD_STOP)
-		return -EINVAL;
+	if (cmd->cmd != V4L2_DEC_CMD_STOP) {
+		ret = -EINVAL;
+		goto unlock;
+	}
 
 	dev_dbg(dev, "Received V4L2_DEC_CMD_STOP\n");
 
 	if (codec_ops->async_drain &&
-	    (atomic_read(&sess->m2m_job_running) ||
-	     v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx))) {
+	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	     (codec_ops->context_switching &&
+	      atomic_read(&sess->m2m_job_running)))) {
 		sess->draining = true;
 		v4l2_m2m_try_schedule(sess->m2m_ctx);
-		return 0;
+		goto unlock;
 	}
 
-	sess->should_stop = 1;
+	amvdec_m2m_finish_drain(sess);
 
-	v4l2_m2m_mark_stopped(sess->m2m_ctx);
-
-	if (codec_ops->drain) {
-		vdec_wait_inactive(sess);
-		codec_ops->drain(sess);
-	} else if (codec_ops->eos_sequence) {
-		u32 len;
-		const u8 *data = codec_ops->eos_sequence(&len);
-
-		esparser_queue_eos(sess->core, data, len);
-		vdec_wait_inactive(sess);
-	}
-
+unlock:
+	mutex_unlock(&sess->lock);
 	return ret;
 }
 
