@@ -206,12 +206,15 @@ static int codec_hevc_alloc_mmu_headers(struct amvdec_session *sess,
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		u32 idx = buf->vb.vb2_buf.index;
 		dma_addr_t paddr;
-		void *vaddr = dma_alloc_coherent(dev, MMU_COMPRESS_HEADER_SIZE,
-						 &paddr, GFP_KERNEL);
-		if (!vaddr) {
-			codec_hevc_free_mmu_headers(sess, comm);
+		void *vaddr;
+
+		if (comm->mmu_header_vaddr[idx])
+			continue;
+
+		vaddr = dma_alloc_coherent(dev, MMU_COMPRESS_HEADER_SIZE,
+					   &paddr, GFP_KERNEL);
+		if (!vaddr)
 			return -ENOMEM;
-		}
 
 		comm->mmu_header_vaddr[idx] = vaddr;
 		comm->mmu_header_paddr[idx] = paddr;
@@ -269,13 +272,14 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		u32 idx = buf->vb.vb2_buf.index;
 		dma_addr_t paddr;
+		void *vaddr;
 
-		void *vaddr = dma_alloc_coherent(dev, am21_size, &paddr,
-						 GFP_KERNEL);
-		if (!vaddr) {
-			codec_hevc_free_fbc_buffers(sess, comm);
+		if (comm->fbc_buffer_vaddr[idx])
+			continue;
+
+		vaddr = dma_alloc_coherent(dev, am21_size, &paddr, GFP_KERNEL);
+		if (!vaddr)
 			return -ENOMEM;
-		}
 
 		comm->fbc_buffer_vaddr[idx] = vaddr;
 		comm->fbc_buffer_paddr[idx] = paddr;
@@ -284,10 +288,8 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 	if (codec_hevc_use_mmu(revision, sess->pixfmt_cap, is_10bit) &&
 	    codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit)) {
 		ret = codec_hevc_alloc_mmu_headers(sess, comm);
-		if (ret) {
-			codec_hevc_free_fbc_buffers(sess, comm);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -299,12 +301,24 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 {
 	struct amvdec_core *core = sess->core;
 	struct device *dev = core->dev;
+	u32 use_mmu;
+	u32 fbc_size = 0;
+	bool use_fbc;
 	int ret;
 
-	codec_hevc_free_fbc_buffers(sess, comm);
+	use_mmu = codec_hevc_use_mmu(core->platform->revision,
+				     sess->pixfmt_cap, is_10bit);
+	use_fbc = use_mmu ||
+		  codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit);
+	if (use_fbc)
+		fbc_size = amvdec_amfbc_size(sess->width, sess->height,
+					     is_10bit, use_mmu);
 
-	if (codec_hevc_use_mmu(core->platform->revision,
-			       sess->pixfmt_cap, is_10bit)) {
+	if (comm->fbc_buffer_size != fbc_size ||
+	    !!comm->mmu_map_vaddr != !!use_mmu)
+		codec_hevc_free_fbc_buffers(sess, comm);
+
+	if (use_mmu && !comm->mmu_map_vaddr) {
 		comm->mmu_map_vaddr = dma_alloc_coherent(dev, MMU_MAP_SIZE,
 							 &comm->mmu_map_paddr,
 							 GFP_KERNEL);
@@ -312,9 +326,7 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 			return -ENOMEM;
 	}
 
-	if (codec_hevc_use_mmu(core->platform->revision,
-			       sess->pixfmt_cap, is_10bit) ||
-	    codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit)) {
+	if (use_fbc) {
 		ret = codec_hevc_alloc_fbc_buffers(sess, comm);
 		if (ret)
 			return ret;
