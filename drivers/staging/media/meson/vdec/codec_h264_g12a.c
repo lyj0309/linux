@@ -982,9 +982,10 @@ codec_h264_multi_configure_picture(struct amvdec_session *sess,
 			bottom = h264->pic_state.poc.bottom;
 		}
 		if (slot || is_current) {
-			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA,
-				h264_multi_buffer_info(slot, is_current,
-						       &h264->pic_state.poc));
+			u32 info = h264_multi_buffer_info(slot, is_current,
+							  &h264->pic_state.poc);
+
+			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, info);
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, top);
 			amvdec_write_dos(core, H264_MULTI_BUFFER_INFO_DATA, bottom);
 		} else {
@@ -1317,7 +1318,7 @@ int codec_h264_multi_read_lmem(struct amvdec_session *sess)
 }
 
 u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
-				       unsigned int index)
+			       unsigned int index)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 
