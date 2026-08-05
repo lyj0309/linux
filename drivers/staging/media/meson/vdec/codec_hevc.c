@@ -1763,8 +1763,11 @@ static void codec_hevc_run(struct amvdec_session *sess)
 		codec_hevc_resume(sess);
 		return;
 	}
-	if (!READ_ONCE(hevc->input_pending)) {
-		WRITE_ONCE(hevc->waiting_for_input, true);
+
+	mutex_lock(&hevc->lock);
+	if (!hevc->input_pending) {
+		hevc->waiting_for_input = true;
+		mutex_unlock(&hevc->lock);
 		return;
 	}
 
@@ -1773,6 +1776,7 @@ static void codec_hevc_run(struct amvdec_session *sess)
 	amvdec_write_dos(sess->core, HEVC_DECODE_SIZE, hevc->input_size);
 	amvdec_write_dos(sess->core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
 	codec_hevc_start_cpu(sess->core);
+	mutex_unlock(&hevc->lock);
 }
 
 static void
@@ -1783,18 +1787,22 @@ codec_hevc_input_queued(struct amvdec_session *sess, u32 payload_size)
 	if (!hevc)
 		return;
 
+	mutex_lock(&hevc->lock);
 	hevc->input_has_frame = false;
 	hevc->input_size = payload_size;
 	WRITE_ONCE(hevc->input_pending, true);
-	if (!READ_ONCE(hevc->waiting_for_input))
+	if (!hevc->waiting_for_input) {
+		mutex_unlock(&hevc->lock);
 		return;
+	}
 
-	WRITE_ONCE(hevc->waiting_for_input, false);
+	hevc->waiting_for_input = false;
 	amvdec_write_dos(sess->core, HEVC_WAIT_FLAG, 0);
 	amvdec_write_dos(sess->core, HEVC_SHIFT_BYTE_COUNT, 0);
 	amvdec_write_dos(sess->core, HEVC_DECODE_SIZE, payload_size);
 	amvdec_write_dos(sess->core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
 	codec_hevc_start_cpu(sess->core);
+	mutex_unlock(&hevc->lock);
 }
 
 static bool codec_hevc_can_queue_input(struct amvdec_session *sess)
