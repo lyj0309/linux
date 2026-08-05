@@ -317,6 +317,18 @@ void codec_hevc_free_fbc_buffers(struct amvdec_session *sess,
 }
 EXPORT_SYMBOL_GPL(codec_hevc_free_fbc_buffers);
 
+static u32 codec_hevc_fbc_buffer_size(struct amvdec_session *sess,
+				      int is_10bit, u32 use_mmu)
+{
+	if (use_mmu)
+		return PAGE_ALIGN(amvdec_amfbc_body_size(sess->width,
+							  sess->height,
+							  is_10bit, use_mmu));
+
+	return amvdec_amfbc_size(sess->width, sess->height, is_10bit,
+				use_mmu);
+}
+
 static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 					struct codec_hevc_common *comm,
 					int is_10bit)
@@ -324,16 +336,15 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 	struct device *dev = sess->core->dev;
 	struct v4l2_m2m_buffer *buf;
 	u32 use_mmu;
-	u32 am21_size;
+	u32 fbc_size;
 	const u32 revision = sess->core->platform->revision;
 	int ret;
 
 	use_mmu = codec_hevc_use_mmu(revision, sess->pixfmt_cap,
 				     is_10bit);
 
-	am21_size = amvdec_amfbc_size(sess->width, sess->height,
-				      is_10bit, use_mmu);
-	comm->fbc_buffer_size = am21_size;
+	fbc_size = codec_hevc_fbc_buffer_size(sess, is_10bit, use_mmu);
+	comm->fbc_buffer_size = fbc_size;
 
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		u32 idx = buf->vb.vb2_buf.index;
@@ -347,14 +358,14 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 			continue;
 
 		if (use_mmu) {
-			sgt = codec_hevc_alloc_mmu_body(dev, am21_size);
+			sgt = codec_hevc_alloc_mmu_body(dev, fbc_size);
 			if (IS_ERR(sgt))
 				return PTR_ERR(sgt);
 			comm->mmu_body_sgt[idx] = sgt;
 			continue;
 		}
 
-		vaddr = dma_alloc_coherent(dev, am21_size, &paddr, GFP_KERNEL);
+		vaddr = dma_alloc_coherent(dev, fbc_size, &paddr, GFP_KERNEL);
 		if (!vaddr)
 			return -ENOMEM;
 
@@ -388,8 +399,8 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 	use_fbc = use_mmu ||
 		  codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit);
 	if (use_fbc)
-		fbc_size = amvdec_amfbc_size(sess->width, sess->height,
-					     is_10bit, use_mmu);
+		fbc_size = codec_hevc_fbc_buffer_size(sess, is_10bit,
+						      use_mmu);
 
 	if (comm->fbc_buffer_size != fbc_size ||
 	    !!comm->mmu_map_vaddr != !!use_mmu)
@@ -434,8 +445,7 @@ int codec_hevc_fill_mmu_map(struct amvdec_session *sess,
 	use_mmu = codec_hevc_use_mmu(sess->core->platform->revision,
 				     sess->pixfmt_cap, is_10bit);
 
-	size = amvdec_amfbc_size(sess->width, sess->height, is_10bit,
-				 use_mmu);
+	size = codec_hevc_fbc_buffer_size(sess, is_10bit, use_mmu);
 
 	nb_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	if (nb_pages > MMU_MAP_SIZE / sizeof(*mmu_map))
