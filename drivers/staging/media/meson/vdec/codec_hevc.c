@@ -1532,8 +1532,16 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	union rpm_param *param = &hevc->rpm_param;
 	u32 slice_segment_address = param->p.slice_segment_address;
+	u32 max_poc_lsb;
 
-	if (param->p.slice_type > I_SLICE)
+	if (param->p.log2_max_pic_order_cnt_lsb_minus4 > 12)
+		return -EINVAL;
+	max_poc_lsb = BIT(param->p.log2_max_pic_order_cnt_lsb_minus4 + 4);
+	if (param->p.slice_type > I_SLICE ||
+	    !hevc->lcu_total || slice_segment_address >= hevc->lcu_total ||
+	    param->p.POClsb >= max_poc_lsb ||
+	    param->p.log2_parallel_merge_level > 6 ||
+	    param->p.five_minus_max_num_merge_cand > 4)
 		return -EINVAL;
 
 	/* First slice: new frame */
