@@ -289,6 +289,9 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	u32 dma_size;
 	u32 wp, wp2;
 
+	if (codec_ops->can_queue_input &&
+	    !codec_ops->can_queue_input(sess))
+		return -EAGAIN;
 
 	/*
 	 * When max ref frame is held by VP9, this should be -= 3 to prevent a
@@ -390,6 +393,8 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 
 	atomic_inc(&sess->esparser_queued_bufs);
 	v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
+	if (codec_ops->input_queued)
+		codec_ops->input_queued(sess, payload_size);
 
 	return 0;
 }
@@ -412,6 +417,8 @@ void esparser_queue_all_src(struct work_struct *work)
 			codec_ops->job_ready(sess);
 
 	ret = amvdec_m2m_job_start(sess);
+	if (ret == -ECANCELED)
+		return;
 	if (ret) {
 		dev_err(sess->core->dev,
 			"failed to acquire decoder hardware: %d\n", ret);
@@ -421,6 +428,10 @@ void esparser_queue_all_src(struct work_struct *work)
 	}
 
 	mutex_lock(&sess->lock);
+	if (!atomic_read(&sess->m2m_job_running)) {
+		mutex_unlock(&sess->lock);
+		return;
+	}
 	vbuf = v4l2_m2m_next_src_buf(sess->m2m_ctx);
 	if (sess->should_stop) {
 		finish = true;
@@ -432,7 +443,8 @@ void esparser_queue_all_src(struct work_struct *work)
 		finish = ret != -EAGAIN;
 		if (!ret && codec_ops->context_switching) {
 			finish = false;
-			queue_next = true;
+			queue_next =
+				v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) > 0;
 		}
 	}
 	mutex_unlock(&sess->lock);
@@ -473,8 +485,9 @@ int esparser_power_up(struct amvdec_session *sess)
 	amvdec_write_parser(core, PARSER_VIDEO_START_PTR, sess->vififo_paddr);
 	amvdec_write_parser(core, PARSER_VIDEO_END_PTR,
 			    sess->vififo_paddr + sess->vififo_size - 8);
-	if (sess->vififo_context_valid)
-		amvdec_write_parser(core, PARSER_VIDEO_WP, sess->vififo_wp);
+	amvdec_write_parser(core, PARSER_VIDEO_WP,
+			    sess->vififo_context_valid ?
+			    sess->vififo_wp : sess->vififo_paddr);
 	amvdec_write_parser(core, PARSER_ES_CONTROL,
 			    amvdec_read_parser(core, PARSER_ES_CONTROL) & ~1);
 

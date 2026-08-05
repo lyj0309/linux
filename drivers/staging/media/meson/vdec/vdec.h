@@ -137,6 +137,10 @@ struct amvdec_ops {
  * struct amvdec_codec_ops - codec operations
  *
  * @start: mandatory call when the codec needs to initialize
+ * @run: optional call after the decoder and parser hardware have started
+ * @input_queued: optional call after compressed input has entered the VIFIFO
+ * @can_queue_input: optional call to determine whether input can be queued
+ * @async_drain: finish queued input before completing a decoder stop command
  * @stop: mandatory call when the codec needs to stop
  * @release: optional call to release session resources after hardware stop
  * @context_switching: the codec can save and restore its hardware context
@@ -159,6 +163,10 @@ struct amvdec_ops {
  */
 struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
+	void (*run)(struct amvdec_session *sess);
+	void (*input_queued)(struct amvdec_session *sess, u32 payload_size);
+	bool (*can_queue_input)(struct amvdec_session *sess);
+	bool async_drain;
 	int (*stop)(struct amvdec_session *sess);
 	void (*release)(struct amvdec_session *sess);
 	bool context_switching;
@@ -242,6 +250,7 @@ enum amvdec_status {
  * @sequence_out: output sequence counter
  * @should_stop: flag set if userspace signaled EOS via command
  *		 or empty buffer
+ * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
  * @num_dst_bufs: number of destination buffers
  * @changed_format: the format changed
@@ -300,6 +309,7 @@ struct amvdec_session {
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
 	unsigned int should_stop;
+	bool draining;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;
