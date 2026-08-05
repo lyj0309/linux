@@ -178,7 +178,7 @@ struct amvdec_ops {
  */
 struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
-	void (*run)(struct amvdec_session *sess);
+	int (*run)(struct amvdec_session *sess);
 	void (*input_queued)(struct amvdec_session *sess, u32 payload_size);
 	bool (*can_queue_input)(struct amvdec_session *sess);
 	bool async_drain;
@@ -198,7 +198,7 @@ struct amvdec_codec_ops {
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
-	void (*resume)(struct amvdec_session *sess);
+	int (*resume)(struct amvdec_session *sess);
 	const u8 * (*eos_sequence)(u32 *len);
 	irqreturn_t (*isr)(struct amvdec_session *sess);
 	irqreturn_t (*threaded_isr)(struct amvdec_session *sess);

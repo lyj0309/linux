@@ -129,8 +129,15 @@ static int vdec_poweron(struct amvdec_session *sess)
 	}
 
 	esparser_power_up(sess);
-	if (codec_ops->run)
-		codec_ops->run(sess);
+	if (codec_ops->run) {
+		ret = codec_ops->run(sess);
+		if (ret) {
+			vdec_ops->stop(sess);
+			if (codec_ops->release && sess->priv)
+				codec_ops->release(sess);
+			goto disable_dos;
+		}
+	}
 
 	return 0;
 
@@ -156,7 +163,7 @@ static int vdec_resume(struct amvdec_session *sess)
 	if (ret)
 		return ret;
 	if (codec_ops->run)
-		codec_ops->run(sess);
+		return codec_ops->run(sess);
 
 	return 0;
 }
@@ -563,7 +570,9 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (sess->status == STATUS_NEEDS_RESUME &&
 	    q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    sess->changed_format) {
-		codec_ops->resume(sess);
+		ret = codec_ops->resume(sess);
+		if (ret)
+			goto bufs_done;
 		sess->status = STATUS_RUNNING;
 		goto unlock_ok;
 	}
