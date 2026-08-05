@@ -99,7 +99,8 @@ int codec_h264_multi_read_lmem(struct amvdec_session *sess);
 u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 				       unsigned int index);
 int codec_h264_multi_parse_config(struct amvdec_session *sess,
-				  u32 seq_info2, u32 seq_info, u32 param4,
+				  u32 seq_info2, u32 seq_info, u32 crop_info,
+				  u32 param4,
 				  struct h264_multi_config *config);
 int codec_h264_multi_parse_marking(struct amvdec_session *sess,
 				   struct h264_multi_marking *marking);
