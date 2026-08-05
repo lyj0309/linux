@@ -1472,7 +1472,7 @@ static void codec_hevc_update_pocs(struct amvdec_session *sess)
 	u32 nal_unit_type = param->p.m_nalUnitType;
 	u32 temporal_id = param->p.m_temporalId & 0x7;
 	int max_poc_lsb =
-		1 << (param->p.log2_max_pic_order_cnt_lsb_minus4 + 4);
+		BIT(param->p.log2_max_pic_order_cnt_lsb_minus4 + 4);
 	int prev_poc_lsb;
 	int prev_poc_msb;
 	int poc_msb;
@@ -1509,27 +1509,9 @@ static void codec_hevc_update_pocs(struct amvdec_session *sess)
 		hevc->prev_tid0_poc = hevc->curr_poc;
 }
 
-static void codec_hevc_process_segment_header(struct amvdec_session *sess)
+static int codec_hevc_process_segment_header(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc = sess->priv;
-	union rpm_param *param = &hevc->rpm_param;
-
-	if (param->p.first_slice_segment_in_pic_flag == 0) {
-		hevc->slice_segment_addr = param->p.slice_segment_address;
-		if (!param->p.dependent_slice_segment_flag)
-			hevc->slice_addr = hevc->slice_segment_addr;
-	} else {
-		hevc->slice_segment_addr = 0;
-		hevc->slice_addr = 0;
-	}
-
-	codec_hevc_update_pocs(sess);
-}
-
-static int codec_hevc_process_segment(struct amvdec_session *sess)
-{
-	struct codec_hevc *hevc = sess->priv;
-	struct amvdec_core *core = sess->core;
 	union rpm_param *param = &hevc->rpm_param;
 	u32 slice_segment_address = param->p.slice_segment_address;
 	u32 max_poc_lsb;
@@ -1543,6 +1525,27 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 	    param->p.log2_parallel_merge_level > 6 ||
 	    param->p.five_minus_max_num_merge_cand > 4)
 		return -EINVAL;
+
+	if (param->p.first_slice_segment_in_pic_flag == 0) {
+		hevc->slice_segment_addr = slice_segment_address;
+		if (!param->p.dependent_slice_segment_flag)
+			hevc->slice_addr = hevc->slice_segment_addr;
+	} else {
+		hevc->slice_segment_addr = 0;
+		hevc->slice_addr = 0;
+	}
+
+	codec_hevc_update_pocs(sess);
+
+	return 0;
+}
+
+static int codec_hevc_process_segment(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+	struct amvdec_core *core = sess->core;
+	union rpm_param *param = &hevc->rpm_param;
+	u32 slice_segment_address = param->p.slice_segment_address;
 
 	/* First slice: new frame */
 	if (slice_segment_address == 0) {
@@ -1733,8 +1736,8 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 	}
 
 	codec_hevc_setup_decode_head(sess, hevc->is_10bit);
-	codec_hevc_process_segment_header(sess);
-	if (codec_hevc_process_segment(sess))
+	if (codec_hevc_process_segment_header(sess) ||
+	    codec_hevc_process_segment(sess))
 		amvdec_abort(sess);
 }
 
@@ -1898,8 +1901,8 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		goto unlock;
 	}
 
-	codec_hevc_process_segment_header(sess);
-	if (codec_hevc_process_segment(sess)) {
+	if (codec_hevc_process_segment_header(sess) ||
+	    codec_hevc_process_segment(sess)) {
 		amvdec_abort(sess);
 		yield = true;
 	}
