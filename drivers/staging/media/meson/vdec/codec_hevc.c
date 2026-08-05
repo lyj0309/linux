@@ -387,8 +387,8 @@ codec_hevc_get_context(struct amvdec_session *sess)
 }
 
 /* Update the L0 and L1 reference lists for a given frame */
-static void codec_hevc_update_frame_refs(struct amvdec_session *sess,
-					 struct hevc_frame *frame)
+static int codec_hevc_update_frame_refs(struct amvdec_session *sess,
+					struct hevc_frame *frame)
 {
 	struct codec_hevc *hevc = sess->priv;
 	union rpm_param *params = &hevc->rpm_param;
@@ -444,6 +444,8 @@ static void codec_hevc_update_frame_refs(struct amvdec_session *sess,
 			cidx = mod_list[i];
 		else
 			cidx = i % total_num;
+		if (cidx >= total_num)
+			return -EINVAL;
 
 		frame->ref_poc_list[0][frame->cur_slice_idx][i] =
 			cidx >= num_neg ? ref_picset1[cidx - num_neg] :
@@ -461,6 +463,8 @@ static void codec_hevc_update_frame_refs(struct amvdec_session *sess,
 				cidx = mod_list[num_ref_idx_l0_active + i];
 			else
 				cidx = mod_list[i];
+			if (cidx >= total_num)
+				return -EINVAL;
 
 			frame->ref_poc_list[1][frame->cur_slice_idx][i] =
 				(cidx >= num_pos) ? ref_picset0[cidx - num_pos]
@@ -484,6 +488,8 @@ end:
 		"Frame %u; slice %u; slice_type %u; num_l0 %u; num_l1 %u\n",
 		frame->poc, frame->cur_slice_idx, params->p.slice_type,
 		frame->ref_num[0], frame->ref_num[1]);
+
+	return 0;
 }
 
 static void codec_hevc_update_ldc_flag(struct codec_hevc *hevc)
@@ -1527,6 +1533,9 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 	union rpm_param *param = &hevc->rpm_param;
 	u32 slice_segment_address = param->p.slice_segment_address;
 
+	if (param->p.slice_type > I_SLICE)
+		return -EINVAL;
+
 	/* First slice: new frame */
 	if (slice_segment_address == 0) {
 		codec_hevc_update_referenced(sess);
@@ -1536,10 +1545,14 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 		if (!hevc->cur_frame)
 			return -1;
 	} else {
+		if (!hevc->cur_frame ||
+		    hevc->cur_frame->cur_slice_idx >= MAX_SLICE_NUM - 1)
+			return -EINVAL;
 		hevc->cur_frame->cur_slice_idx++;
 	}
 
-	codec_hevc_update_frame_refs(sess, hevc->cur_frame);
+	if (codec_hevc_update_frame_refs(sess, hevc->cur_frame))
+		return -EINVAL;
 	codec_hevc_update_col_frame(hevc);
 	codec_hevc_update_ldc_flag(hevc);
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
