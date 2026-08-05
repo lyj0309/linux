@@ -1570,10 +1570,11 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 	codec_hevc_update_col_frame(hevc);
 	codec_hevc_update_ldc_flag(hevc);
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
-			       hevc->is_10bit))
-		codec_hevc_fill_mmu_map(sess, &hevc->common,
-					&hevc->cur_frame->vbuf->vb2_buf,
-					hevc->is_10bit);
+			       hevc->is_10bit) &&
+	    codec_hevc_fill_mmu_map(sess, &hevc->common,
+				    &hevc->cur_frame->vbuf->vb2_buf,
+				    hevc->is_10bit))
+		return -EINVAL;
 	codec_hevc_set_mc(sess, hevc->cur_frame);
 	codec_hevc_set_mcrcc(sess);
 	codec_hevc_set_mpred(sess, hevc->cur_frame, hevc->col_frame);
