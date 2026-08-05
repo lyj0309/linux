@@ -244,6 +244,7 @@ struct hevc_frame {
 
 	int referenced;
 	int show;
+	bool requeued;
 	u32 num_reorder_pic;
 
 	u32 cur_slice_idx;
@@ -329,6 +330,33 @@ static u32 codec_hevc_num_pending_bufs(struct amvdec_session *sess)
 	mutex_unlock(&hevc->lock);
 
 	return ret;
+}
+
+static bool
+codec_hevc_hold_capture_buf(struct amvdec_session *sess,
+			    struct vb2_v4l2_buffer *vbuf)
+{
+	struct codec_hevc *hevc = sess->priv;
+	struct hevc_frame *frame;
+	bool hold = false;
+
+	if (!hevc)
+		return false;
+
+	mutex_lock(&hevc->lock);
+	list_for_each_entry(frame, &hevc->ref_frames_list, list) {
+		if (frame->vbuf != vbuf)
+			continue;
+
+		if (frame->referenced) {
+			frame->requeued = true;
+			hold = true;
+		}
+		break;
+	}
+	mutex_unlock(&hevc->lock);
+
+	return hold;
 }
 
 static struct codec_hevc *
@@ -484,8 +512,9 @@ static void codec_hevc_update_ldc_flag(struct codec_hevc *hevc)
 }
 
 /* Tag "old" frames that are no longer referenced */
-static void codec_hevc_update_referenced(struct codec_hevc *hevc)
+static void codec_hevc_update_referenced(struct amvdec_session *sess)
 {
+	struct codec_hevc *hevc = sess->priv;
 	union rpm_param *param = &hevc->rpm_param;
 	struct hevc_frame *frame;
 	u32 rps_used_bit = hevc->rps_used_bit;
@@ -521,6 +550,10 @@ static void codec_hevc_update_referenced(struct codec_hevc *hevc)
 		}
 
 		frame->referenced = is_referenced;
+		if (!is_referenced && frame->requeued) {
+			frame->requeued = false;
+			v4l2_m2m_buf_queue(sess->m2m_ctx, frame->vbuf);
+		}
 	}
 }
 
@@ -772,6 +805,9 @@ static void codec_hevc_flush_output(struct amvdec_session *sess)
 	}
 
 	list_for_each_entry_safe(tmp, n, &hevc->ref_frames_list, list) {
+		if (tmp->requeued)
+			v4l2_m2m_buf_done(tmp->vbuf, VB2_BUF_STATE_ERROR);
+
 		list_del(&tmp->list);
 		kfree(tmp);
 	}
@@ -1470,7 +1506,7 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 
 	/* First slice: new frame */
 	if (slice_segment_address == 0) {
-		codec_hevc_update_referenced(hevc);
+		codec_hevc_update_referenced(sess);
 		codec_hevc_show_frames(sess);
 
 		hevc->cur_frame = codec_hevc_prepare_new_frame(sess);
@@ -1822,6 +1858,7 @@ struct amvdec_codec_ops codec_hevc_g12a_ops = {
 	.isr = codec_hevc_isr,
 	.threaded_isr = codec_hevc_threaded_isr,
 	.num_pending_bufs = codec_hevc_num_pending_bufs,
+	.hold_capture_buf = codec_hevc_hold_capture_buf,
 	.drain = codec_hevc_flush_output,
 	.resume = codec_hevc_resume,
 };
