@@ -935,6 +935,73 @@ codec_hevc_get_frame_by_poc(struct codec_hevc *hevc, u32 poc)
 }
 
 static struct hevc_frame *
+codec_hevc_nearest_frame(struct codec_hevc *hevc, u32 poc, bool prefer_past)
+{
+	struct hevc_frame *past = NULL;
+	struct hevc_frame *future = NULL;
+	struct hevc_frame *tmp;
+	u64 past_delta = U64_MAX;
+	u64 future_delta = U64_MAX;
+	s64 target = (s32)poc;
+
+	list_for_each_entry(tmp, &hevc->ref_frames_list, list) {
+		s64 delta;
+
+		if (tmp == hevc->cur_frame)
+			continue;
+
+		delta = (s64)(s32)tmp->poc - target;
+		if (delta < 0 && -delta < past_delta) {
+			past_delta = -delta;
+			past = tmp;
+		} else if (delta > 0 && delta < future_delta) {
+			future_delta = delta;
+			future = tmp;
+		}
+	}
+
+	if (prefer_past)
+		return past ? past : future;
+
+	return future ? future : past;
+}
+
+static void codec_hevc_conceal_missing_refs(struct amvdec_session *sess,
+					    struct hevc_frame *frame)
+{
+	struct codec_hevc *hevc = sess->priv;
+	u32 slice_idx = frame->cur_slice_idx;
+	u32 list_count;
+	u32 list;
+
+	if (frame->cur_slice_type == I_SLICE)
+		return;
+	list_count = frame->cur_slice_type == B_SLICE ? 2 : 1;
+
+	for (list = 0; list < list_count; list++) {
+		u32 *ref_poc_list = frame->ref_poc_list[list][slice_idx];
+		u32 i;
+
+		for (i = 0; i < frame->ref_num[list]; i++) {
+			struct hevc_frame *ref_frame;
+
+			ref_frame = codec_hevc_get_frame_by_poc(hevc, ref_poc_list[i]);
+			if (ref_frame)
+				continue;
+
+			ref_frame = codec_hevc_nearest_frame(hevc, ref_poc_list[i], !list);
+			if (!ref_frame)
+				ref_frame = frame;
+			dev_warn_ratelimited(sess->core->dev,
+					     "Missing L%u reference POC %d, using POC %d\n",
+					     list, (s32)ref_poc_list[i],
+					     (s32)ref_frame->poc);
+			ref_poc_list[i] = ref_frame->poc;
+		}
+	}
+}
+
+static struct hevc_frame *
 codec_hevc_prepare_new_frame(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -1391,11 +1458,8 @@ static void codec_hevc_set_ref_list(struct amvdec_session *sess,
 	for (i = 0; i < ref_num; i++) {
 		ref_frame = codec_hevc_get_frame_by_poc(hevc, ref_poc_list[i]);
 
-		if (!ref_frame) {
-			dev_warn(core->dev, "Couldn't find ref. frame %u\n",
-				 ref_poc_list[i]);
-			continue;
-		}
+		if (!ref_frame)
+			ref_frame = hevc->cur_frame;
 
 		if (codec_hevc_use_fbc(sess->pixfmt_cap, hevc->is_10bit)) {
 			buf_id_y = ref_frame->vbuf->vb2_buf.index;
@@ -1569,6 +1633,7 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 
 	if (codec_hevc_update_frame_refs(sess, hevc->cur_frame))
 		return -EINVAL;
+	codec_hevc_conceal_missing_refs(sess, hevc->cur_frame);
 	codec_hevc_update_col_frame(hevc);
 	codec_hevc_update_ldc_flag(hevc);
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
