@@ -295,6 +295,7 @@ struct codec_hevc {
 	bool input_has_frame;
 	bool input_pending;
 	bool waiting_for_input;
+	bool resume_pending;
 
 	/* Whether we detected the bitstream as 10-bit */
 	int is_10bit;
@@ -635,6 +636,11 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	ret = codec_hevc_setup_workspace(sess, hevc);
 	if (ret)
 		goto free_hevc;
+	if (multi && hevc->width && hevc->common.ref_buffer_count) {
+		codec_hevc_restore_buffers(sess, &hevc->common,
+					   hevc->is_10bit);
+		codec_hevc_setup_decode_head(sess, hevc->is_10bit);
+	}
 
 	val = BIT(0); /* stream_fetch_enable */
 	if (core->platform->revision >= VDEC_REVISION_G12A)
@@ -1560,6 +1566,17 @@ static void codec_hevc_fetch_rpm(struct amvdec_session *sess)
 static void codec_hevc_resume(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc = sess->priv;
+	struct amvdec_core *core = sess->core;
+	unsigned long flags;
+	bool active;
+
+	spin_lock_irqsave(&core->irq_lock, flags);
+	active = core->cur_sess == sess;
+	spin_unlock_irqrestore(&core->irq_lock, flags);
+	if (!active) {
+		WRITE_ONCE(hevc->resume_pending, true);
+		return;
+	}
 
 	if (codec_hevc_setup_buffers(sess, &hevc->common, hevc->is_10bit)) {
 		amvdec_abort(sess);
@@ -1592,6 +1609,11 @@ static void codec_hevc_run(struct amvdec_session *sess)
 
 	if (!hevc)
 		return;
+	if (READ_ONCE(hevc->resume_pending)) {
+		WRITE_ONCE(hevc->resume_pending, false);
+		codec_hevc_resume(sess);
+		return;
+	}
 	if (!READ_ONCE(hevc->input_pending)) {
 		WRITE_ONCE(hevc->waiting_for_input, true);
 		return;
@@ -1631,6 +1653,19 @@ static bool codec_hevc_can_queue_input(struct amvdec_session *sess)
 	struct codec_hevc *hevc = sess->priv;
 
 	return hevc && !READ_ONCE(hevc->input_pending);
+}
+
+static bool codec_hevc_has_pending_job(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+
+	return hevc && READ_ONCE(hevc->resume_pending);
+}
+
+static bool codec_hevc_job_ready(struct amvdec_session *sess)
+{
+	return sess->streamon_cap &&
+		v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) > 0;
 }
 
 static void codec_hevc_finish_job(struct amvdec_session *sess)
@@ -1690,6 +1725,8 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	if (codec_hevc_process_rpm(hevc)) {
 		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height, 16,
 				  hevc->is_10bit ? 10 : 8);
+		if (sess->status == STATUS_NEEDS_RESUME)
+			amvdec_m2m_job_yield(sess);
 		goto unlock;
 	}
 
@@ -1731,7 +1768,10 @@ struct amvdec_codec_ops codec_hevc_g12a_ops = {
 	.stop = codec_hevc_keep_context,
 	.release = codec_hevc_release,
 	.irq = AMVDEC_IRQ_MBOX0,
+	.context_switching = true,
 	.prepare_firmware = codec_hevc_prepare_firmware,
+	.has_pending_job = codec_hevc_has_pending_job,
+	.job_ready = codec_hevc_job_ready,
 	.isr = codec_hevc_isr,
 	.threaded_isr = codec_hevc_threaded_isr,
 	.num_pending_bufs = codec_hevc_num_pending_bufs,
