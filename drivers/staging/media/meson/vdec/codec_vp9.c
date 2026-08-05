@@ -1098,8 +1098,9 @@ static struct vp9_frame *codec_vp9_get_frame_by_idx(struct codec_vp9 *vp9,
 	return NULL;
 }
 
-static void codec_vp9_sync_ref(struct codec_vp9 *vp9)
+static int codec_vp9_sync_ref(struct amvdec_session *sess)
 {
+	struct codec_vp9 *vp9 = sess->priv;
 	union rpm_param *param = &vp9->rpm_param;
 	int i;
 
@@ -1109,10 +1110,14 @@ static void codec_vp9_sync_ref(struct codec_vp9 *vp9)
 		const int idx = vp9->ref_frame_map[ref];
 
 		vp9->frame_refs[i] = codec_vp9_get_frame_by_idx(vp9, idx);
-		if (!vp9->frame_refs[i])
-			pr_warn("%s: couldn't find VP9 ref %d\n", __func__,
-				idx);
+		if (!vp9->frame_refs[i]) {
+			dev_err(sess->core->dev_dec,
+				"Couldn't find VP9 reference %d\n", idx);
+			return -EINVAL;
+		}
 	}
+
+	return 0;
 }
 
 static void codec_vp9_set_refs(struct amvdec_session *sess,
@@ -1232,6 +1237,21 @@ static struct vp9_frame *codec_vp9_get_new_frame(struct amvdec_session *sess)
 	return new_frame;
 }
 
+static void codec_vp9_discard_frame(struct amvdec_session *sess)
+{
+	struct codec_vp9 *vp9 = sess->priv;
+	struct vp9_frame *frame = vp9->cur_frame;
+
+	if (!frame)
+		return;
+
+	v4l2_m2m_buf_queue(sess->m2m_ctx, frame->vbuf);
+	list_del(&frame->list);
+	kfree(frame);
+	vp9->cur_frame = NULL;
+	vp9->frames_num--;
+}
+
 static void codec_vp9_show_existing_frame(struct codec_vp9 *vp9)
 {
 	union rpm_param *param = &vp9->rpm_param;
@@ -1260,40 +1280,45 @@ static void codec_vp9_rm_noshow_frame(struct amvdec_session *sess)
 	}
 }
 
-static void codec_vp9_process_frame(struct amvdec_session *sess)
+static int codec_vp9_process_frame(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct codec_vp9 *vp9 = sess->priv;
 	union rpm_param *param = &vp9->rpm_param;
-	int intra_only;
+	int intra_only, ret;
 
 	if (!param->p.show_frame)
 		codec_vp9_rm_noshow_frame(sess);
 
 	vp9->cur_frame = codec_vp9_get_new_frame(sess);
 	if (!vp9->cur_frame)
-		return;
+		return -ENOMEM;
 
 	pr_debug("frame %d: type: %08X; show_exist: %u; show: %u, intra_only: %u\n",
 		 vp9->cur_frame->index,
 		 param->p.frame_type, param->p.show_existing_frame,
 		 param->p.show_frame, param->p.intra_only);
 
-	if (param->p.frame_type != KEY_FRAME)
-		codec_vp9_sync_ref(vp9);
+	intra_only = param->p.show_frame ? 0 : param->p.intra_only;
+	if (param->p.frame_type != KEY_FRAME && !intra_only &&
+	    codec_vp9_sync_ref(sess)) {
+		codec_vp9_discard_frame(sess);
+		return -EINVAL;
+	}
+
 	codec_vp9_update_next_ref(vp9);
 	codec_vp9_show_existing_frame(vp9);
 
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
-			       vp9->is_10bit) &&
-	    codec_hevc_fill_mmu_map(sess, &vp9->common,
-				    &vp9->cur_frame->vbuf->vb2_buf,
-				    vp9->is_10bit)) {
-		amvdec_abort(sess);
-		return;
+			       vp9->is_10bit)) {
+		ret = codec_hevc_fill_mmu_map(sess, &vp9->common,
+					      &vp9->cur_frame->vbuf->vb2_buf,
+					      vp9->is_10bit);
+		if (ret) {
+			codec_vp9_discard_frame(sess);
+			return ret;
+		}
 	}
-
-	intra_only = param->p.show_frame ? 0 : param->p.intra_only;
 
 	/* clear mpred (for keyframe only) */
 	if (param->p.frame_type != KEY_FRAME && !intra_only) {
@@ -1314,6 +1339,8 @@ static void codec_vp9_process_frame(struct amvdec_session *sess)
 
 	/* ask uCode to start decoding */
 	amvdec_write_dos(core, VP9_DEC_STATUS_REG, VP9_10B_DECODE_SLICE);
+
+	return 0;
 }
 
 static void codec_vp9_process_lf(struct codec_vp9 *vp9)
@@ -1361,11 +1388,13 @@ static int codec_vp9_resume(struct amvdec_session *sess)
 	codec_vp9_setup_workspace(sess, vp9);
 	codec_hevc_setup_decode_head(sess, vp9->is_10bit);
 	codec_vp9_process_lf(vp9);
-	codec_vp9_process_frame(sess);
+	ret = codec_vp9_process_frame(sess);
 
 	mutex_unlock(&vp9->lock);
+	if (ret)
+		amvdec_abort(sess);
 
-	return 0;
+	return ret;
 }
 
 /*
@@ -2173,7 +2202,11 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 	}
 
 	codec_vp9_process_lf(vp9);
-	codec_vp9_process_frame(sess);
+	ret = codec_vp9_process_frame(sess);
+	if (ret) {
+		amvdec_abort(sess);
+		goto unlock;
+	}
 	codec_vp9_show_frame(sess);
 
 unlock:
