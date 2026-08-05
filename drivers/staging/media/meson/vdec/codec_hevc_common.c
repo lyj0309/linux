@@ -260,8 +260,9 @@ static struct sg_table *codec_hevc_alloc_mmu_body(struct device *dev,
 	if (!sgt)
 		goto free_pages;
 
-	ret = sg_alloc_table_from_pages(sgt, pages, num_pages, 0, size,
-					GFP_KERNEL);
+	ret = sg_alloc_table_from_pages_segment(sgt, pages, num_pages, 0, size,
+						dma_get_max_seg_size(dev),
+						GFP_KERNEL);
 	if (ret)
 		goto free_sgt;
 
