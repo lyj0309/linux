@@ -38,6 +38,7 @@
 #define H264_MULTI_DECODE_SEQINFO	AV_SCRATCH_5
 #define H264_MULTI_SEQ_INFO2		AV_SCRATCH_1
 #define H264_MULTI_SEQ_INFO		AV_SCRATCH_2
+#define H264_MULTI_CROP_INFO		AV_SCRATCH_6
 #define H264_MULTI_PARAM4		AV_SCRATCH_B
 #define H264_MULTI_FRAME_COUNTER		AV_SCRATCH_I
 #define H264_MULTI_DPB_STATUS		AV_SCRATCH_J
@@ -489,14 +490,16 @@ static int codec_h264_multi_configure(struct amvdec_session *sess)
 	unsigned int capture_buf_count;
 	u32 seq_info2;
 	u32 seq_info;
+	u32 crop_info;
 	u32 param4;
 	int ret;
 
 	seq_info2 = amvdec_read_dos(core, H264_MULTI_SEQ_INFO2);
 	seq_info = amvdec_read_dos(core, H264_MULTI_SEQ_INFO);
+	crop_info = amvdec_read_dos(core, H264_MULTI_CROP_INFO);
 	param4 = amvdec_read_dos(core, H264_MULTI_PARAM4);
 	ret = codec_h264_multi_parse_config(sess, seq_info2, seq_info,
-					    param4, &config);
+					    crop_info, param4, &config);
 	if (ret)
 		return ret;
 
@@ -1136,36 +1139,9 @@ u16 codec_h264_multi_lmem_word(struct amvdec_session *sess,
 	return h264->lmem.words[index];
 }
 
-static int h264_multi_crop_units(u8 chroma_format_idc,
-				 bool frame_mbs_only,
-				 u32 *crop_unit_x, u32 *crop_unit_y)
-{
-	switch (chroma_format_idc) {
-	case 0:
-		*crop_unit_x = 1;
-		*crop_unit_y = 2 - frame_mbs_only;
-		break;
-	case 1:
-		*crop_unit_x = 2;
-		*crop_unit_y = 2 * (2 - frame_mbs_only);
-		break;
-	case 2:
-		*crop_unit_x = 2;
-		*crop_unit_y = 2 - frame_mbs_only;
-		break;
-	case 3:
-		*crop_unit_x = 1;
-		*crop_unit_y = 2 - frame_mbs_only;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 int codec_h264_multi_parse_config(struct amvdec_session *sess,
-				  u32 seq_info2, u32 seq_info, u32 param4,
+				  u32 seq_info2, u32 seq_info, u32 crop_info,
+				  u32 param4,
 				  struct h264_multi_config *config)
 {
 	struct codec_h264_multi *h264 = sess->priv;
@@ -1173,8 +1149,6 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 	u32 crop_left;
 	u32 crop_right;
 	u32 crop_top;
-	u32 crop_unit_x;
-	u32 crop_unit_y;
 	u32 mb_height;
 	u32 mb_total;
 	u32 mb_width;
@@ -1252,20 +1226,10 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 		config->offset_for_ref_frame[ret] =
 			(s16)h264->lmem.data.mmco.offset_for_ref_frame[ret];
 
-	ret = h264_multi_crop_units(config->chroma_format_idc,
-				    config->frame_mbs_only,
-				    &crop_unit_x, &crop_unit_y);
-	if (ret)
-		return ret;
-
-	crop_left = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_LEFT] *
-		crop_unit_x;
-	crop_right = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_RIGHT] *
-		crop_unit_x;
-	crop_top = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_TOP] *
-		crop_unit_y;
-	crop_bottom = h264->lmem.data.params[H264_MULTI_PARAM_FRAME_CROP_BOTTOM] *
-		crop_unit_y;
+	crop_left = FIELD_GET(GENMASK(31, 24), crop_info);
+	crop_right = FIELD_GET(GENMASK(23, 16), crop_info);
+	crop_top = FIELD_GET(GENMASK(15, 8), crop_info);
+	crop_bottom = FIELD_GET(GENMASK(7, 0), crop_info);
 	if (crop_left + crop_right >= config->coded_width ||
 	    crop_top + crop_bottom >= config->coded_height)
 		return -EINVAL;
