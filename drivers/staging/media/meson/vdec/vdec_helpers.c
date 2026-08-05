@@ -581,10 +581,10 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, dpb_size);
 
-	sess->bitdepth = bitdepth;
-
 	capture_ready = sess->width == width && sess->height == height &&
+			sess->bitdepth == bitdepth &&
 			dpb_size <= sess->num_dst_bufs;
+	sess->bitdepth = bitdepth;
 
 	/* Keep decoding if the active capture queue can hold the new format. */
 	if (sess->streamon_cap && capture_ready) {
