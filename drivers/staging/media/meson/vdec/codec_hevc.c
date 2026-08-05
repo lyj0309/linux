@@ -976,6 +976,7 @@ codec_hevc_set_sao(struct amvdec_session *sess, struct hevc_frame *frame)
 	struct codec_hevc *hevc = sess->priv;
 	struct vb2_buffer *vb = &frame->vbuf->vb2_buf;
 	union rpm_param *param = &hevc->rpm_param;
+	bool multi = sess->fmt_out->codec_ops->irq == AMVDEC_IRQ_MBOX0;
 	u32 pic_height_cu =
 		(hevc->height + hevc->lcu_size - 1) / hevc->lcu_size;
 	u32 sao_mem_unit = (hevc->lcu_size == 16 ? 9 :
@@ -1078,12 +1079,21 @@ codec_hevc_set_sao(struct amvdec_session *sess, struct hevc_frame *frame)
 		amvdec_write_dos(core, HEVC_DBLK_CFG1, val);
 	}
 
-	val = amvdec_read_dos(core, HEVC_SAO_CTRL1) & ~0x3ff3;
-	val |= 0xff0; /* Set endianness for 2-bytes swaps (nv12) */
-	if (core->platform->revision < VDEC_REVISION_G12A) {
+	val = amvdec_read_dos(core, HEVC_SAO_CTRL1);
+	if (multi) {
+		val &= ~0xfff3;
+		val |= 0xff0; /* Set endianness for 2-byte swaps (NV12). */
+		val |= 2 << 14; /* Linear output with 64-byte line alignment. */
 		if (!codec_hevc_use_fbc(sess->pixfmt_cap, hevc->is_10bit))
-			val |= BIT(0); /* disable cm compression */
-		/* TOFIX: Handle Amlogic Framebuffer compression */
+			val |= BIT(0); /* Disable compressed output. */
+	} else {
+		val &= ~0x3ff3;
+		val |= 0xff0; /* Set endianness for 2-byte swaps (NV12). */
+		if (core->platform->revision < VDEC_REVISION_G12A) {
+			if (!codec_hevc_use_fbc(sess->pixfmt_cap, hevc->is_10bit))
+				val |= BIT(0); /* Disable compressed output. */
+			/* TOFIX: Handle Amlogic Framebuffer compression */
+		}
 	}
 
 	amvdec_write_dos(core, HEVC_SAO_CTRL1, val);
@@ -1094,8 +1104,14 @@ codec_hevc_set_sao(struct amvdec_session *sess, struct hevc_frame *frame)
 		amvdec_write_dos(core, HEVC_SAO_CTRL5, val);
 	}
 
-	val = amvdec_read_dos(core, HEVCD_IPP_AXIIF_CONFIG) & ~0x30;
-	val |= 0xf;
+	val = amvdec_read_dos(core, HEVCD_IPP_AXIIF_CONFIG);
+	if (multi) {
+		val &= ~(BIT(12) | GENMASK(9, 8) | GENMASK(5, 0));
+		val |= (2 << 8) | 0xf; /* NV12, linear, 64-byte alignment. */
+	} else {
+		val &= ~0x30;
+		val |= 0xf;
+	}
 	amvdec_write_dos(core, HEVCD_IPP_AXIIF_CONFIG, val);
 
 	val = 0;
