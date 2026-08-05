@@ -1522,6 +1522,9 @@ static int codec_hevc_process_segment_header(struct amvdec_session *sess)
 	if (param->p.slice_type > I_SLICE ||
 	    !hevc->lcu_total || slice_segment_address >= hevc->lcu_total ||
 	    param->p.POClsb >= max_poc_lsb ||
+	    !(param->p.m_temporalId & 0x7) ||
+	    param->p.collocated_from_l0_flag > 1 ||
+	    param->p.sps_num_reorder_pics_0 >= hevc->dpb_size ||
 	    param->p.log2_parallel_merge_level > 6 ||
 	    param->p.five_minus_max_num_merge_cand > 4)
 		return -EINVAL;
