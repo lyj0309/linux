@@ -1533,10 +1533,11 @@ int codec_h264_multi_parse_picture(struct amvdec_session *sess,
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	const struct h264_multi_lmem_dpb *dpb;
+	u32 mb_count;
 	u16 picture_structure;
 	u16 slice_type;
 
-	if (!h264 || !picture)
+	if (!h264 || !picture || !h264->config_valid)
 		return -EINVAL;
 
 	memset(picture, 0, sizeof(*picture));
@@ -1557,6 +1558,13 @@ int codec_h264_multi_parse_picture(struct amvdec_session *sess,
 		h264_multi_lmem_s32(dpb->delta_pic_order_cnt[1]);
 	picture->first_mb_in_slice =
 		h264->lmem.data.params[H264_MULTI_PARAM_FIRST_MB_IN_SLICE];
+	mb_count = DIV_ROUND_UP(h264->config.coded_width, 16) *
+		   DIV_ROUND_UP(h264->config.coded_height, 16);
+	if (picture->frame_num >= h264->config.max_frame_num ||
+	    (h264->config.pic_order_cnt_type == 0 &&
+	     picture->pic_order_cnt_lsb >= h264->config.max_pic_order_cnt_lsb) ||
+	    picture->first_mb_in_slice >= mb_count)
+		return -EINVAL;
 
 	if (dpb->num_ref_idx_l0_active_minus1 >= V4L2_H264_REF_LIST_LEN ||
 	    dpb->num_ref_idx_l1_active_minus1 >= V4L2_H264_REF_LIST_LEN)
