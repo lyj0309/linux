@@ -1850,8 +1850,6 @@ static void codec_hevc_finish_job(struct amvdec_session *sess)
 		v4l2_m2m_mark_stopped(sess->m2m_ctx);
 		sess->draining = false;
 	}
-
-	amvdec_m2m_job_yield(sess);
 }
 
 static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
@@ -1859,6 +1857,7 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct codec_hevc *hevc = sess->priv;
 	u32 dec_status = amvdec_read_dos(core, HEVC_DEC_STATUS_REG);
+	bool yield = false;
 	int ret;
 
 	if (!hevc)
@@ -1871,13 +1870,14 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	     dec_status == HEVC_SEARCH_BUFEMPTY ||
 	     dec_status == HEVC_DECODE_BUFEMPTY2)) {
 		codec_hevc_finish_job(sess);
+		yield = true;
 		goto unlock;
 	}
 	if (dec_status != HEVC_SLICE_SEGMENT_DONE) {
 		dev_err(core->dev_dec, "Unrecognized dec_status: %08X\n",
 			dec_status);
 		amvdec_abort(sess);
-		amvdec_m2m_job_yield(sess);
+		yield = true;
 		goto unlock;
 	}
 
@@ -1886,26 +1886,28 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	ret = codec_hevc_process_rpm(sess);
 	if (ret < 0) {
 		amvdec_abort(sess);
-		amvdec_m2m_job_yield(sess);
+		yield = true;
 		goto unlock;
 	}
 	if (ret > 0) {
 		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height,
-				  hevc->dpb_size,
-				  hevc->is_10bit ? 10 : 8);
+					  hevc->dpb_size,
+					  hevc->is_10bit ? 10 : 8);
 		if (sess->status == STATUS_NEEDS_RESUME)
-			amvdec_m2m_job_yield(sess);
+			yield = true;
 		goto unlock;
 	}
 
 	codec_hevc_process_segment_header(sess);
 	if (codec_hevc_process_segment(sess)) {
 		amvdec_abort(sess);
-		amvdec_m2m_job_yield(sess);
+		yield = true;
 	}
 
 unlock:
 	mutex_unlock(&hevc->lock);
+	if (yield)
+		amvdec_m2m_job_yield(sess);
 	return IRQ_HANDLED;
 }
 
