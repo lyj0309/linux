@@ -142,6 +142,32 @@ disable_dos_parser:
 	return ret;
 }
 
+static int vdec_resume(struct amvdec_session *sess)
+{
+	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	int ret;
+
+	ret = vdec_ops->resume(sess);
+	if (ret)
+		return ret;
+
+	ret = esparser_power_up(sess);
+	if (ret)
+		return ret;
+	if (codec_ops->run)
+		codec_ops->run(sess);
+
+	return 0;
+}
+
+static void vdec_stop_hardware(struct amvdec_session *sess)
+{
+	sess->fmt_out->vdec_ops->stop(sess);
+	clk_disable_unprepare(sess->core->dos_clk);
+	clk_disable_unprepare(sess->core->dos_parser_clk);
+}
+
 static void vdec_wait_inactive(struct amvdec_session *sess)
 {
 	u64 deadline = get_jiffies_64() + msecs_to_jiffies(1000);
@@ -160,7 +186,6 @@ static void vdec_wait_inactive(struct amvdec_session *sess)
 
 static void vdec_poweroff(struct amvdec_session *sess)
 {
-	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
 	sess->should_stop = 1;
@@ -168,18 +193,21 @@ static void vdec_poweroff(struct amvdec_session *sess)
 	if (codec_ops->drain)
 		codec_ops->drain(sess);
 
-	vdec_ops->stop(sess);
+	vdec_stop_hardware(sess);
 	if (codec_ops->release && sess->priv)
 		codec_ops->release(sess);
-	clk_disable_unprepare(sess->core->dos_clk);
-	clk_disable_unprepare(sess->core->dos_parser_clk);
 }
 
 static void vdec_suspend(struct amvdec_session *sess)
 {
-	sess->fmt_out->vdec_ops->stop(sess);
-	clk_disable_unprepare(sess->core->dos_clk);
-	clk_disable_unprepare(sess->core->dos_parser_clk);
+	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+
+	if (vdec_ops->suspend && vdec_ops->resume) {
+		vdec_ops->suspend(sess);
+		return;
+	}
+
+	vdec_stop_hardware(sess);
 }
 
 static void
@@ -209,6 +237,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 {
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
+	struct amvdec_session *hw_sess;
 	int irq = vdec_session_irq(sess);
 	int ret = 0;
 
@@ -230,12 +259,27 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		goto unlock;
 	}
 
+	hw_sess = core->hw_sess;
+	if (hw_sess && hw_sess->fmt_out->vdec_ops != sess->fmt_out->vdec_ops) {
+		vdec_stop_hardware(hw_sess);
+		core->hw_sess = NULL;
+		hw_sess = NULL;
+	}
+
 	vdec_set_current_session(core, sess);
-	ret = vdec_poweron(sess);
+	if (hw_sess)
+		ret = vdec_resume(sess);
+	else
+		ret = vdec_poweron(sess);
 	if (ret) {
 		vdec_set_current_session(core, NULL);
+		if (hw_sess) {
+			vdec_stop_hardware(sess);
+			core->hw_sess = NULL;
+		}
 		goto unlock;
 	}
+	core->hw_sess = sess;
 
 unlock:
 	mutex_unlock(&core->hw_lock);
@@ -253,8 +297,16 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 		disable_irq(irq);
 
 	mutex_lock(&core->hw_lock);
-	if (core->cur_sess == sess) {
-		vdec_suspend(sess);
+	if (core->cur_sess == sess ||
+	    (synchronize && core->hw_sess == sess)) {
+		if (synchronize) {
+			vdec_stop_hardware(sess);
+			core->hw_sess = NULL;
+		} else {
+			vdec_suspend(sess);
+			if (!sess->fmt_out->vdec_ops->resume)
+				core->hw_sess = NULL;
+		}
 		vdec_set_current_session(core, NULL);
 	}
 	mutex_unlock(&core->hw_lock);
@@ -557,6 +609,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 			sess->status = STATUS_STOPPED;
 			goto vififo_free;
 		}
+		core->hw_sess = sess;
 		enable_irq(irq);
 	}
 
@@ -635,9 +688,10 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 		if (vdec_codec_needs_recycle(sess))
 			kthread_stop(sess->recycle_thread);
 
-		if (core->cur_sess == sess) {
+		if (core->hw_sess == sess) {
 			vdec_set_current_session(core, NULL);
 			vdec_poweroff(sess);
+			core->hw_sess = NULL;
 		} else if (codec_ops->release && sess->priv) {
 			codec_ops->release(sess);
 		}
