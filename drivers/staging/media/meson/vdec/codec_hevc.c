@@ -319,6 +319,7 @@ struct codec_hevc {
 static u32 codec_hevc_num_pending_bufs(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc;
+	struct hevc_frame *frame;
 	u32 ret;
 
 	hevc = sess->priv;
@@ -327,6 +328,10 @@ static u32 codec_hevc_num_pending_bufs(struct amvdec_session *sess)
 
 	mutex_lock(&hevc->lock);
 	ret = hevc->frames_num;
+	list_for_each_entry(frame, &hevc->ref_frames_list, list) {
+		if (frame->requeued)
+			ret++;
+	}
 	mutex_unlock(&hevc->lock);
 
 	return ret;
