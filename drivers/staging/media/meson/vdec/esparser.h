@@ -11,8 +11,13 @@
 
 #include "vdec.h"
 
+#define ESPARSER_VP9_MAX_FRAMES 8
+
 int esparser_init(struct platform_device *pdev, struct amvdec_core *core);
 int esparser_power_up(struct amvdec_session *sess);
+int esparser_vp9_parse_frame_sizes(const u8 *data, u32 size,
+				   u32 frame_sizes[ESPARSER_VP9_MAX_FRAMES],
+				   u32 *num_frames, u32 *payload_size);
 
 /**
  * esparser_queue_eos() - write End Of Stream sequence to the ESPARSER

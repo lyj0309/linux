@@ -11,6 +11,7 @@
 #include <linux/ioctl.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include <linux/reset.h>
 #include <linux/interrupt.h>
 #include <media/videobuf2-dma-contig.h>
@@ -75,70 +76,104 @@ static irqreturn_t esparser_isr(int irq, void *dev)
  * VP9 frame headers need to be appended by a 16-byte long
  * Amlogic custom header
  */
-static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
+int esparser_vp9_parse_frame_sizes(const u8 *data, u32 size,
+				   u32 frame_sizes[ESPARSER_VP9_MAX_FRAMES],
+				   u32 *num_frames, u32 *payload_size)
 {
-	u8 *dp;
+	u32 total_size = 0;
 	u8 marker;
-	int dsize;
-	int num_frames, cur_frame;
-	int cur_mag, mag, mag_ptr;
-	int frame_size[8], tot_frame_size[8];
-	int total_datasize = 0;
-	int new_frame_size;
+	u32 frames;
+	u32 mag;
+	u32 pos;
+	u32 i;
+
+	if (!data || !size || !frame_sizes || !num_frames || !payload_size)
+		return -EINVAL;
+
+	marker = data[size - 1];
+	if ((marker & 0xe0) != 0xc0) {
+		frame_sizes[0] = size;
+		*num_frames = 1;
+		*payload_size = size;
+		return 0;
+	}
+
+	frames = (marker & 0x7) + 1;
+	mag = ((marker >> 3) & 0x3) + 1;
+	if (size < mag * frames + 2)
+		return -EINVAL;
+	pos = size - mag * frames - 2;
+	if (data[pos++] != marker)
+		return -EINVAL;
+
+	for (i = 0; i < frames; i++) {
+		u32 frame_size = 0;
+		u32 j;
+
+		for (j = 0; j < mag; j++)
+			frame_size |= (u32)data[pos++] << (j * 8);
+		if (!frame_size)
+			return -EINVAL;
+		if (check_add_overflow(total_size, frame_size, &total_size))
+			return -EOVERFLOW;
+		frame_sizes[i] = frame_size;
+	}
+
+	if (total_size != size - mag * frames - 2)
+		return -EINVAL;
+
+	*num_frames = frames;
+	*payload_size = total_size;
+	return 0;
+}
+
+static u32 vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
+{
+	size_t buffer_size = vb2_plane_size(buf, 0);
+	u8 *dp;
+	u32 dsize;
+	u32 frame_size[ESPARSER_VP9_MAX_FRAMES];
+	u32 tot_frame_size[ESPARSER_VP9_MAX_FRAMES];
+	u32 total_datasize;
+	u32 num_frames;
+	u32 new_frame_size;
 	unsigned char *old_header = NULL;
+	int cur_frame;
+	int ret;
 
 	dp = (uint8_t *)vb2_plane_vaddr(buf, 0);
 	dsize = vb2_get_plane_payload(buf, 0);
 
-	if (dsize == vb2_plane_size(buf, 0)) {
+	if (!dp || !dsize || dsize >= buffer_size) {
 		dev_warn(core->dev, "%s: unable to update header\n", __func__);
 		return 0;
 	}
 
-	marker = dp[dsize - 1];
-	if ((marker & 0xe0) == 0xc0) {
-		num_frames = (marker & 0x7) + 1;
-		mag = ((marker >> 3) & 0x3) + 1;
-		mag_ptr = dsize - mag * num_frames - 2;
-		if (dp[mag_ptr] != marker)
-			return 0;
+	ret = esparser_vp9_parse_frame_sizes(dp, dsize, frame_size,
+					     &num_frames, &total_datasize);
+	if (ret)
+		return 0;
 
-		mag_ptr++;
-		for (cur_frame = 0; cur_frame < num_frames; cur_frame++) {
-			frame_size[cur_frame] = 0;
-			for (cur_mag = 0; cur_mag < mag; cur_mag++) {
-				frame_size[cur_frame] |=
-					(dp[mag_ptr] << (cur_mag * 8));
-				mag_ptr++;
-			}
-			if (cur_frame == 0)
-				tot_frame_size[cur_frame] =
-					frame_size[cur_frame];
-			else
-				tot_frame_size[cur_frame] =
-					tot_frame_size[cur_frame - 1] +
-					frame_size[cur_frame];
-			total_datasize += frame_size[cur_frame];
-		}
-	} else {
-		num_frames = 1;
-		frame_size[0] = dsize;
-		tot_frame_size[0] = dsize;
-		total_datasize = dsize;
-	}
+	tot_frame_size[0] = frame_size[0];
+	for (cur_frame = 1; cur_frame < num_frames; cur_frame++)
+		tot_frame_size[cur_frame] = tot_frame_size[cur_frame - 1] +
+					    frame_size[cur_frame];
 
-	new_frame_size = total_datasize + num_frames * VP9_HEADER_SIZE;
+	if (check_add_overflow(total_datasize,
+			       (u32)num_frames * VP9_HEADER_SIZE,
+			       &new_frame_size))
+		return 0;
 
-	if (new_frame_size >= vb2_plane_size(buf, 0)) {
+	if (new_frame_size >= buffer_size) {
 		dev_warn(core->dev, "%s: unable to update header\n", __func__);
 		return 0;
 	}
 
 	for (cur_frame = num_frames - 1; cur_frame >= 0; cur_frame--) {
-		int framesize = frame_size[cur_frame];
-		int framesize_header = framesize + 4;
-		int oldframeoff = tot_frame_size[cur_frame] - framesize;
-		int outheaderoff =  oldframeoff + cur_frame * VP9_HEADER_SIZE;
+		u32 framesize = frame_size[cur_frame];
+		u32 framesize_header = framesize + 4;
+		u32 oldframeoff = tot_frame_size[cur_frame] - framesize;
+		u32 outheaderoff = oldframeoff + cur_frame * VP9_HEADER_SIZE;
 		u8 *fdata = dp + outheaderoff;
 		u8 *old_framedata = dp + oldframeoff;
 
@@ -163,12 +198,13 @@ static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
 
 		if (!old_header) {
 			/* nothing */
-		} else if (old_header > fdata + 16 + framesize) {
+		} else if (old_header > fdata + VP9_HEADER_SIZE + framesize) {
 			dev_dbg(core->dev, "%s: data has gaps, setting to 0\n",
 				__func__);
-			memset(fdata + 16 + framesize, 0,
-			       (old_header - fdata + 16 + framesize));
-		} else if (old_header < fdata + 16 + framesize) {
+			memset(fdata + VP9_HEADER_SIZE + framesize, 0,
+			       old_header -
+			       (fdata + VP9_HEADER_SIZE + framesize));
+		} else if (old_header < fdata + VP9_HEADER_SIZE + framesize) {
 			dev_err(core->dev, "%s: data overwritten\n", __func__);
 		}
 		old_header = fdata;
@@ -336,6 +372,12 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	vbuf->field = V4L2_FIELD_NONE;
 	vbuf->sequence = sess->sequence_out++;
 
+	if (!vaddr) {
+		amvdec_remove_ts(sess, vb->timestamp);
+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		return -EFAULT;
+	}
+
 	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9) {
 		payload_size = vp9_update_header(core, vb);
 
@@ -346,12 +388,6 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 
 			return 0;
 		}
-	}
-
-	if (!vaddr) {
-		amvdec_remove_ts(sess, vb->timestamp);
-		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
-		return -EFAULT;
 	}
 
 	pad_size = payload_size < ESPARSER_MIN_PACKET_SIZE ?
