@@ -100,6 +100,7 @@ int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
 				   const struct h264_multi_picture *picture,
 				   struct v4l2_h264_reference *refs,
 				   unsigned int num_valid,
+				   unsigned int num_active,
 				   const u16 *commands,
 				   unsigned int num_commands);
 
