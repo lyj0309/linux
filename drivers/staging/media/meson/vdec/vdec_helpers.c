@@ -525,23 +525,22 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	static const struct v4l2_event ev = {
 		.type = V4L2_EVENT_SOURCE_CHANGE,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
+	bool capture_ready;
 
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, dpb_size);
 
 	sess->bitdepth = bitdepth;
 
-	/*
-	 * Check if the capture queue is already configured well for our
-	 * usecase. If so, keep decoding with it.
-	 */
-	if (sess->streamon_cap &&
-	    sess->width == width &&
-	    sess->height == height &&
-	    dpb_size <= sess->num_dst_bufs) {
+	capture_ready = sess->width == width && sess->height == height &&
+			dpb_size <= sess->num_dst_bufs;
+
+	/* Keep decoding if the active capture queue can hold the new format. */
+	if (sess->streamon_cap && capture_ready) {
 		sess->fmt_out->codec_ops->resume(sess);
 	} else {
 		sess->status = STATUS_NEEDS_RESUME;
-		sess->changed_format = 0;
+		/* A compatible queue may have been allocated before this event. */
+		sess->changed_format = capture_ready;
 	}
 
 	sess->width = width;
