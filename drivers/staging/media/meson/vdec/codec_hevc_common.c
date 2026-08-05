@@ -350,7 +350,6 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 			if (IS_ERR(sgt))
 				return PTR_ERR(sgt);
 			comm->mmu_body_sgt[idx] = sgt;
-			comm->fbc_buffer_paddr[idx] = sg_dma_address(sgt->sgl);
 			continue;
 		}
 
