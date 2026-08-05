@@ -1727,6 +1727,10 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 		return;
 	}
 	hevc->reset_buffers = false;
+	if (codec_hevc_setup_workspace(sess, hevc)) {
+		amvdec_abort(sess);
+		return;
+	}
 
 	codec_hevc_setup_decode_head(sess, hevc->is_10bit);
 	codec_hevc_process_segment_header(sess);
