@@ -134,6 +134,8 @@
 /* Buffer sizes */
 #define SIZE_WORKSPACE ALIGN(LMEM_OFFSET + LMEM_SIZE, 64 * SZ_1K)
 #define SIZE_AUX (SZ_1K * 16)
+#define SIZE_FW_SWAP (SZ_1K * 16)
+#define FW_SWAP_OFFSET (SZ_1K * 12)
 #define SIZE_FRAME_MMU (0x1200 * 4)
 #define RPM_SIZE 0x80
 #define RPS_USED_BIT 14
@@ -248,6 +250,8 @@ struct codec_hevc {
 	/* AUX buffer */
 	void      *aux_vaddr;
 	dma_addr_t aux_paddr;
+	void      *fw_swap_vaddr;
+	dma_addr_t fw_swap_paddr;
 
 	/* Contains many information parsed from the bitstream */
 	union rpm_param rpm_param;
@@ -297,6 +301,26 @@ static u32 codec_hevc_num_pending_bufs(struct amvdec_session *sess)
 	mutex_unlock(&hevc->lock);
 
 	return ret;
+}
+
+static struct codec_hevc *
+codec_hevc_get_context(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+
+	if (hevc)
+		return hevc;
+
+	hevc = kzalloc_obj(*hevc);
+	if (!hevc)
+		return NULL;
+
+	INIT_LIST_HEAD(&hevc->ref_frames_list);
+	hevc->curr_poc = INVALID_POC;
+	mutex_init(&hevc->lock);
+	sess->priv = hevc;
+
+	return hevc;
 }
 
 /* Update the L0 and L1 reference lists for a given frame */
@@ -523,13 +547,18 @@ codec_hevc_setup_workspace(struct amvdec_session *sess,
 	u32 revision = core->platform->revision;
 	dma_addr_t wkaddr;
 
-	/* Allocate some memory for the HEVC decoder's state */
-	hevc->workspace_vaddr = dma_alloc_coherent(core->dev, SIZE_WORKSPACE,
-						   &wkaddr, GFP_KERNEL);
-	if (!hevc->workspace_vaddr)
-		return -ENOMEM;
+	if (!hevc->workspace_vaddr) {
+		hevc->workspace_vaddr = dma_alloc_coherent(core->dev,
+							   SIZE_WORKSPACE,
+							   &wkaddr, GFP_KERNEL);
+		if (!hevc->workspace_vaddr)
+			return -ENOMEM;
 
-	hevc->workspace_paddr = wkaddr;
+		memset(hevc->workspace_vaddr, 0, SIZE_WORKSPACE);
+		hevc->workspace_paddr = wkaddr;
+	} else {
+		wkaddr = hevc->workspace_paddr;
+	}
 
 	amvdec_write_dos(core, HEVCD_IPP_LINEBUFF_BASE, wkaddr + IPP_OFFSET);
 	amvdec_write_dos(core, HEVC_RPM_BUFFER, wkaddr + RPM_OFFSET);
@@ -574,16 +603,15 @@ static int codec_hevc_start(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct codec_hevc *hevc;
+	bool new_session = false;
 	u32 val;
 	int i;
 	int ret;
 
-	hevc = kzalloc(sizeof(*hevc), GFP_KERNEL);
+	new_session = !sess->priv;
+	hevc = codec_hevc_get_context(sess);
 	if (!hevc)
 		return -ENOMEM;
-
-	INIT_LIST_HEAD(&hevc->ref_frames_list);
-	hevc->curr_poc = INVALID_POC;
 
 	ret = codec_hevc_setup_workspace(sess, hevc);
 	if (ret)
@@ -641,23 +669,31 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, HEVC_DECODE_MODE2, 0);
 
 	/* AUX buffers */
-	hevc->aux_vaddr = dma_alloc_coherent(core->dev, SIZE_AUX,
-					     &hevc->aux_paddr, GFP_KERNEL);
 	if (!hevc->aux_vaddr) {
-		ret = -ENOMEM;
-		goto free_hevc;
+		hevc->aux_vaddr = dma_alloc_coherent(core->dev, SIZE_AUX,
+						     &hevc->aux_paddr,
+						     GFP_KERNEL);
+		if (!hevc->aux_vaddr) {
+			ret = -ENOMEM;
+			goto free_hevc;
+		}
 	}
 
 	amvdec_write_dos(core, HEVC_AUX_ADR, hevc->aux_paddr);
 	amvdec_write_dos(core, HEVC_AUX_DATA_SIZE,
 			 (((SIZE_AUX) >> 4) << 16) | 0);
-	mutex_init(&hevc->lock);
-	sess->priv = hevc;
-
 	return 0;
 
 free_hevc:
-	kfree(hevc);
+	if (new_session) {
+		if (hevc->workspace_vaddr)
+			dma_free_coherent(core->dev, SIZE_WORKSPACE,
+					  hevc->workspace_vaddr,
+					  hevc->workspace_paddr);
+		mutex_destroy(&hevc->lock);
+		kfree(hevc);
+		sess->priv = NULL;
+	}
 	return ret;
 }
 
@@ -676,6 +712,47 @@ static void codec_hevc_flush_output(struct amvdec_session *sess)
 		list_del(&tmp->list);
 		kfree(tmp);
 	}
+}
+
+static int codec_hevc_prepare_firmware(struct amvdec_session *sess,
+				       const u8 *data, u32 len)
+{
+	struct codec_hevc *hevc = sess->priv;
+	bool new_session = false;
+
+	if (len < FW_SWAP_OFFSET + SIZE_FW_SWAP) {
+		dev_err(sess->core->dev,
+			"HEVC multi firmware is too small: %u bytes\n", len);
+		return -EINVAL;
+	}
+
+	new_session = !hevc;
+	hevc = codec_hevc_get_context(sess);
+	if (!hevc)
+		return -ENOMEM;
+
+	if (!hevc->fw_swap_vaddr) {
+		hevc->fw_swap_vaddr = dma_alloc_coherent(sess->core->dev,
+							 SIZE_FW_SWAP,
+							 &hevc->fw_swap_paddr,
+							 GFP_KERNEL);
+		if (!hevc->fw_swap_vaddr) {
+			if (new_session) {
+				mutex_destroy(&hevc->lock);
+				kfree(hevc);
+				sess->priv = NULL;
+			}
+			return -ENOMEM;
+		}
+	}
+
+	memcpy(hevc->fw_swap_vaddr, data + FW_SWAP_OFFSET, SIZE_FW_SWAP);
+	return 0;
+}
+
+static int codec_hevc_keep_context(struct amvdec_session *sess)
+{
+	return 0;
 }
 
 static int codec_hevc_stop(struct amvdec_session *sess)
@@ -700,6 +777,36 @@ static int codec_hevc_stop(struct amvdec_session *sess)
 	mutex_destroy(&hevc->lock);
 
 	return 0;
+}
+
+static void codec_hevc_release(struct amvdec_session *sess)
+{
+	struct codec_hevc *hevc = sess->priv;
+	struct amvdec_core *core = sess->core;
+
+	if (!hevc)
+		return;
+
+	mutex_lock(&hevc->lock);
+	codec_hevc_flush_output(sess);
+
+	if (hevc->workspace_vaddr)
+		dma_free_coherent(core->dev, SIZE_WORKSPACE,
+				  hevc->workspace_vaddr,
+				  hevc->workspace_paddr);
+	if (hevc->aux_vaddr)
+		dma_free_coherent(core->dev, SIZE_AUX,
+				  hevc->aux_vaddr, hevc->aux_paddr);
+	if (hevc->fw_swap_vaddr)
+		dma_free_coherent(core->dev, SIZE_FW_SWAP,
+				  hevc->fw_swap_vaddr,
+				  hevc->fw_swap_paddr);
+
+	codec_hevc_free_fbc_buffers(sess, &hevc->common);
+	mutex_unlock(&hevc->lock);
+	mutex_destroy(&hevc->lock);
+	kfree(hevc);
+	sess->priv = NULL;
 }
 
 static struct hevc_frame *
@@ -1455,6 +1562,20 @@ static irqreturn_t codec_hevc_isr(struct amvdec_session *sess)
 struct amvdec_codec_ops codec_hevc_ops = {
 	.start = codec_hevc_start,
 	.stop = codec_hevc_stop,
+	.isr = codec_hevc_isr,
+	.threaded_isr = codec_hevc_threaded_isr,
+	.num_pending_bufs = codec_hevc_num_pending_bufs,
+	.drain = codec_hevc_flush_output,
+	.resume = codec_hevc_resume,
+};
+
+struct amvdec_codec_ops codec_hevc_g12a_ops = {
+	.start = codec_hevc_start,
+	.async_drain = true,
+	.stop = codec_hevc_keep_context,
+	.release = codec_hevc_release,
+	.irq = AMVDEC_IRQ_MBOX0,
+	.prepare_firmware = codec_hevc_prepare_firmware,
 	.isr = codec_hevc_isr,
 	.threaded_isr = codec_hevc_threaded_isr,
 	.num_pending_bufs = codec_hevc_num_pending_bufs,

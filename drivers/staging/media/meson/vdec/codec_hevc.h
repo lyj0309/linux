@@ -9,5 +9,6 @@
 #include "vdec.h"
 
 extern struct amvdec_codec_ops codec_hevc_ops;
+extern struct amvdec_codec_ops codec_hevc_g12a_ops;
 
 #endif
