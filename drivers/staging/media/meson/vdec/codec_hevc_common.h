@@ -21,12 +21,16 @@ extern const u16 vdec_hevc_parser_cmd[VDEC_HEVC_PARSER_CMD_LEN];
 struct codec_hevc_common {
 	void      *fbc_buffer_vaddr[MAX_REF_PIC_NUM];
 	dma_addr_t fbc_buffer_paddr[MAX_REF_PIC_NUM];
+	size_t fbc_buffer_size;
 
 	void      *mmu_header_vaddr[MAX_REF_PIC_NUM];
 	dma_addr_t mmu_header_paddr[MAX_REF_PIC_NUM];
 
 	void      *mmu_map_vaddr;
 	dma_addr_t mmu_map_paddr;
+
+	dma_addr_t ref_buffer_paddr[MAX_REF_PIC_NUM][2];
+	u32 ref_buffer_count;
 };
 
 /* Returns 1 if we must use framebuffer compression */
@@ -61,6 +65,10 @@ void codec_hevc_free_mmu_headers(struct amvdec_session *sess,
 int codec_hevc_setup_buffers(struct amvdec_session *sess,
 			     struct codec_hevc_common *comm,
 			     int is_10bit);
+
+void codec_hevc_restore_buffers(struct amvdec_session *sess,
+				struct codec_hevc_common *comm,
+				int is_10bit);
 
 void codec_hevc_fill_mmu_map(struct amvdec_session *sess,
 			     struct codec_hevc_common *comm,
