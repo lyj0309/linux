@@ -163,6 +163,8 @@ struct amvdec_ops {
  *		     a new OUTPUT buffer
  * @job_ready: optional call to check whether a pending codec job can run
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
+ * @hold_capture_buf: optional call to hold a returned capture buffer while it
+ *		     remains referenced by the decoder
  * @can_recycle: optional call to know if the codec is ready to recycle
  *		 a dst buffer
  * @recycle: optional call to tell the codec to recycle a dst buffer. Must go
@@ -191,6 +193,8 @@ struct amvdec_codec_ops {
 	bool (*has_pending_job)(struct amvdec_session *sess);
 	bool (*job_ready)(struct amvdec_session *sess);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
+	bool (*hold_capture_buf)(struct amvdec_session *sess,
+				 struct vb2_v4l2_buffer *vbuf);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);

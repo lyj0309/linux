@@ -514,12 +514,20 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct amvdec_session *sess = vb2_get_drv_priv(vb->vb2_queue);
 	struct v4l2_m2m_ctx *m2m_ctx = sess->m2m_ctx;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	bool held = false;
 
-	v4l2_m2m_buf_queue(m2m_ctx, vbuf);
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    codec_ops->hold_capture_buf)
+		held = codec_ops->hold_capture_buf(sess, vbuf);
+	if (!held)
+		v4l2_m2m_buf_queue(m2m_ctx, vbuf);
 
 	if (!sess->streamon_out)
 		return;
-	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	if ((vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+	     (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && !held &&
+	      codec_ops->context_switching)) &&
 	    atomic_read(&sess->m2m_job_running))
 		schedule_work(&sess->esparser_queue_work);
 
