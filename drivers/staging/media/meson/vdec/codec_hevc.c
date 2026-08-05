@@ -311,6 +311,7 @@ struct codec_hevc {
 	bool input_pending;
 	bool waiting_for_input;
 	bool resume_pending;
+	bool reset_buffers;
 
 	/* Whether we detected the bitstream as 10-bit */
 	int is_10bit;
@@ -693,7 +694,8 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	ret = codec_hevc_setup_workspace(sess, hevc);
 	if (ret)
 		goto free_hevc;
-	if (multi && hevc->width && hevc->common.ref_buffer_count) {
+	if (multi && !hevc->reset_buffers && hevc->width &&
+	    hevc->common.ref_buffer_count) {
 		codec_hevc_restore_buffers(sess, &hevc->common,
 					   hevc->is_10bit);
 		codec_hevc_setup_decode_head(sess, hevc->is_10bit);
@@ -1673,6 +1675,9 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 	unsigned long flags;
 	bool active;
 
+	if (sess->status == STATUS_NEEDS_RESUME)
+		hevc->reset_buffers = true;
+
 	spin_lock_irqsave(&core->irq_lock, flags);
 	active = core->cur_sess == sess;
 	spin_unlock_irqrestore(&core->irq_lock, flags);
@@ -1681,10 +1686,13 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 		return;
 	}
 
+	if (hevc->reset_buffers)
+		codec_hevc_free_fbc_buffers(sess, &hevc->common);
 	if (codec_hevc_setup_buffers(sess, &hevc->common, hevc->is_10bit)) {
 		amvdec_abort(sess);
 		return;
 	}
+	hevc->reset_buffers = false;
 
 	codec_hevc_setup_decode_head(sess, hevc->is_10bit);
 	codec_hevc_process_segment_header(sess);
