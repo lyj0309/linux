@@ -343,6 +343,11 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 			break;
 		case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 			switch (sess->pixfmt_cap) {
+			case V4L2_PIX_FMT_NV12:
+				if (*num_planes != 1 ||
+				    sizes[0] < output_size + output_size / 2)
+					return -EINVAL;
+				break;
 			case V4L2_PIX_FMT_NV12M:
 				if (*num_planes != 2 ||
 				    sizes[0] < output_size ||
@@ -374,6 +379,10 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 		switch (sess->pixfmt_cap) {
+		case V4L2_PIX_FMT_NV12:
+			sizes[0] = output_size + output_size / 2;
+			*num_planes = 1;
+			break;
 		case V4L2_PIX_FMT_NV12M:
 			sizes[0] = output_size;
 			sizes[1] = output_size / 2;
@@ -710,7 +719,11 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 			pixmp->pixelformat = fmt_out->pixfmts_cap[0];
 
 		memset(pfmt[1].reserved, 0, sizeof(pfmt[1].reserved));
-		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M) {
+		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12) {
+			pfmt[0].sizeimage = output_size + output_size / 2;
+			pfmt[0].bytesperline = ALIGN(pixmp->width, 32);
+			pixmp->num_planes = 1;
+		} else if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M) {
 			pfmt[0].sizeimage = output_size;
 			pfmt[0].bytesperline = ALIGN(pixmp->width, 32);
 
