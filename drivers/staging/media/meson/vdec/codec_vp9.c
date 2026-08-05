@@ -1282,10 +1282,13 @@ static void codec_vp9_process_frame(struct amvdec_session *sess)
 	codec_vp9_show_existing_frame(vp9);
 
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
-			       vp9->is_10bit))
-		codec_hevc_fill_mmu_map(sess, &vp9->common,
-					&vp9->cur_frame->vbuf->vb2_buf,
-					vp9->is_10bit);
+			       vp9->is_10bit) &&
+	    codec_hevc_fill_mmu_map(sess, &vp9->common,
+				    &vp9->cur_frame->vbuf->vb2_buf,
+				    vp9->is_10bit)) {
+		amvdec_abort(sess);
+		return;
+	}
 
 	intra_only = param->p.show_frame ? 0 : param->p.intra_only;
 
