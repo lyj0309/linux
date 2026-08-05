@@ -55,6 +55,26 @@ static void vdec_set_current_session(struct amvdec_core *core,
 	spin_unlock_irqrestore(&core->irq_lock, flags);
 }
 
+static int vdec_session_irq(struct amvdec_session *sess)
+{
+	return sess->core->irqs[sess->fmt_out->codec_ops->irq];
+}
+
+static struct amvdec_session *
+vdec_current_session(struct amvdec_core *core, int irq)
+{
+	struct amvdec_session *sess;
+	unsigned long flags;
+
+	spin_lock_irqsave(&core->irq_lock, flags);
+	sess = core->cur_sess;
+	if (sess && vdec_session_irq(sess) != irq)
+		sess = NULL;
+	spin_unlock_irqrestore(&core->irq_lock, flags);
+
+	return sess;
+}
+
 static int vdec_codec_needs_recycle(struct amvdec_session *sess)
 {
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
@@ -181,12 +201,15 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 {
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
+	int irq = vdec_session_irq(sess);
 	int ret = 0;
 
 	if (!codec_ops->context_switching)
 		return 0;
+	if (irq < 0)
+		return irq;
 
-	disable_irq(core->vdec_irq);
+	disable_irq(irq);
 	mutex_lock(&core->hw_lock);
 	if (!atomic_read(&sess->m2m_job_running)) {
 		ret = -ECANCELED;
@@ -208,7 +231,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 unlock:
 	mutex_unlock(&core->hw_lock);
-	enable_irq(core->vdec_irq);
+	enable_irq(irq);
 	return ret;
 }
 
@@ -216,9 +239,10 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 				      bool synchronize)
 {
 	struct amvdec_core *core = sess->core;
+	int irq = vdec_session_irq(sess);
 
 	if (synchronize)
-		disable_irq(core->vdec_irq);
+		disable_irq(irq);
 
 	mutex_lock(&core->hw_lock);
 	if (core->cur_sess == sess) {
@@ -228,7 +252,7 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 	mutex_unlock(&core->hw_lock);
 
 	if (synchronize)
-		enable_irq(core->vdec_irq);
+		enable_irq(irq);
 }
 
 static void vdec_m2m_complete_job(struct amvdec_session *sess,
@@ -432,7 +456,11 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *buf;
+	int irq = vdec_session_irq(sess);
 	int ret;
+
+	if (irq < 0)
+		return irq;
 
 	mutex_lock(&core->hw_lock);
 
@@ -491,17 +519,17 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	sess->sequence_out = 0;
 	sess->status = STATUS_INIT;
 	if (!codec_ops->context_switching) {
-		disable_irq(core->vdec_irq);
+		disable_irq(irq);
 		vdec_set_current_session(core, sess);
 
 		ret = vdec_poweron(sess);
 		if (ret) {
 			vdec_set_current_session(core, NULL);
-			enable_irq(core->vdec_irq);
+			enable_irq(irq);
 			sess->status = STATUS_STOPPED;
 			goto vififo_free;
 		}
-		enable_irq(core->vdec_irq);
+		enable_irq(irq);
 	}
 
 	if (vdec_codec_needs_recycle(sess))
@@ -565,13 +593,14 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *buf;
 	bool decoder_active;
+	int irq = vdec_session_irq(sess);
 
 	decoder_active = sess->status == STATUS_RUNNING ||
 			 sess->status == STATUS_INIT ||
 			 (sess->status == STATUS_NEEDS_RESUME &&
 			  (!sess->streamon_out || !sess->streamon_cap));
 	if (decoder_active)
-		disable_irq(core->vdec_irq);
+		disable_irq(irq);
 	mutex_lock(&core->hw_lock);
 
 	if (decoder_active) {
@@ -619,7 +648,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 
 	mutex_unlock(&core->hw_lock);
 	if (decoder_active)
-		enable_irq(core->vdec_irq);
+		enable_irq(irq);
 }
 
 static int vdec_vb2_buf_prepare(struct vb2_buffer *vb)
@@ -1150,11 +1179,9 @@ static irqreturn_t vdec_isr(int irq, void *data)
 	struct amvdec_core *core = data;
 	struct amvdec_session *sess;
 
-	spin_lock(&core->irq_lock);
-	sess = core->cur_sess;
+	sess = vdec_current_session(core, irq);
 	if (sess)
 		sess->last_irq_jiffies = get_jiffies_64();
-	spin_unlock(&core->irq_lock);
 
 	if (!sess)
 		return IRQ_NONE;
@@ -1167,9 +1194,7 @@ static irqreturn_t vdec_threaded_isr(int irq, void *data)
 	struct amvdec_core *core = data;
 	struct amvdec_session *sess;
 
-	spin_lock(&core->irq_lock);
-	sess = core->cur_sess;
-	spin_unlock(&core->irq_lock);
+	sess = vdec_current_session(core, irq);
 
 	if (!sess)
 		return IRQ_NONE;
@@ -1259,16 +1284,30 @@ static int vdec_probe(struct platform_device *pdev)
 	if (IS_ERR(core->vdec_hevc_clk))
 		return -EPROBE_DEFER;
 
-	irq = platform_get_irq_byname(pdev, "vdec");
+	irq = platform_get_irq_byname_optional(pdev, "mbox1");
+	if (irq == -ENXIO)
+		irq = platform_get_irq_byname(pdev, "vdec");
 	if (irq < 0)
 		return irq;
-	core->vdec_irq = irq;
+	core->irqs[AMVDEC_IRQ_MBOX1] = irq;
 
 	ret = devm_request_threaded_irq(core->dev, irq, vdec_isr,
 					vdec_threaded_isr, IRQF_ONESHOT,
-					"vdec", core);
+					"vdec-mbox1", core);
 	if (ret)
 		return ret;
+
+	irq = platform_get_irq_byname_optional(pdev, "mbox0");
+	if (irq == -EPROBE_DEFER)
+		return irq;
+	core->irqs[AMVDEC_IRQ_MBOX0] = irq;
+	if (irq >= 0) {
+		ret = devm_request_threaded_irq(core->dev, irq, vdec_isr,
+						vdec_threaded_isr, IRQF_ONESHOT,
+						"vdec-mbox0", core);
+		if (ret)
+			return ret;
+	}
 
 	ret = esparser_init(pdev, core);
 	if (ret)
