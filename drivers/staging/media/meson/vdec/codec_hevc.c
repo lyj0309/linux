@@ -37,7 +37,9 @@
 #define HEVC_DECODE_MODE2	HEVC_ASSIST_SCRATCH_H
 #define NAL_SEARCH_CTL		HEVC_ASSIST_SCRATCH_I
 #define HEVC_DECODE_MODE	HEVC_ASSIST_SCRATCH_J
-	#define DECODE_MODE_SINGLE 0
+	#define DECODE_MODE_SINGLE			0
+	#define DECODE_MODE_MULTI_FRAMEBASE	1
+	#define DECODE_MODE_MBOX0			(0x80 << 24)
 #define DECODE_STOP_POS		HEVC_ASSIST_SCRATCH_K
 #define HEVC_AUX_ADR		HEVC_ASSIST_SCRATCH_L
 #define HEVC_AUX_DATA_SIZE	HEVC_ASSIST_SCRATCH_M
@@ -282,6 +284,8 @@ struct codec_hevc {
 	u32 slice_segment_addr;
 	u32 slice_addr;
 	u32 ldc_flag;
+	u8 start_decoding_flag;
+	u8 rps_set_id;
 
 	/* Whether we detected the bitstream as 10-bit */
 	int is_10bit;
@@ -602,7 +606,9 @@ codec_hevc_setup_workspace(struct amvdec_session *sess,
 static int codec_hevc_start(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct codec_hevc *hevc;
+	bool multi = codec_ops->irq == AMVDEC_IRQ_MBOX0;
 	bool new_session = false;
 	u32 val;
 	int i;
@@ -655,18 +661,30 @@ static int codec_hevc_start(struct amvdec_session *sess)
 
 	amvdec_write_dos(core, HEVC_WAIT_FLAG, 1);
 
-	/* clear mailbox interrupt */
-	amvdec_write_dos(core, HEVC_ASSIST_MBOX1_CLR_REG, 1);
-	/* enable mailbox interrupt */
-	amvdec_write_dos(core, HEVC_ASSIST_MBOX1_MASK, 1);
+	/* Clear and enable the firmware mailbox interrupt. */
+	if (multi) {
+		amvdec_write_dos(core, HEVC_ASSIST_MBOX0_CLR_REG, 1);
+		amvdec_write_dos(core, HEVC_ASSIST_MBOX0_MASK, 1);
+	} else {
+		amvdec_write_dos(core, HEVC_ASSIST_MBOX1_CLR_REG, 1);
+		amvdec_write_dos(core, HEVC_ASSIST_MBOX1_MASK, 1);
+	}
 	/* disable PSCALE for hardware sharing */
 	amvdec_write_dos(core, HEVC_PSCALE_CTRL, 0);
-	/* Let the uCode do all the parsing */
-	amvdec_write_dos(core, NAL_SEARCH_CTL, 0xc);
+	/* Let the uCode do all the parsing. */
+	amvdec_write_dos(core, NAL_SEARCH_CTL, multi ? 0x4 : 0xc);
 
 	amvdec_write_dos(core, DECODE_STOP_POS, 0);
-	amvdec_write_dos(core, HEVC_DECODE_MODE, DECODE_MODE_SINGLE);
-	amvdec_write_dos(core, HEVC_DECODE_MODE2, 0);
+	if (multi) {
+		amvdec_write_dos(core, HEVC_DECODE_MODE,
+				 DECODE_MODE_MBOX0 |
+				 (hevc->start_decoding_flag << 16) |
+				 DECODE_MODE_MULTI_FRAMEBASE);
+		amvdec_write_dos(core, HEVC_DECODE_MODE2, hevc->rps_set_id);
+	} else {
+		amvdec_write_dos(core, HEVC_DECODE_MODE, DECODE_MODE_SINGLE);
+		amvdec_write_dos(core, HEVC_DECODE_MODE2, 0);
+	}
 
 	/* AUX buffers */
 	if (!hevc->aux_vaddr) {
@@ -682,6 +700,9 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, HEVC_AUX_ADR, hevc->aux_paddr);
 	amvdec_write_dos(core, HEVC_AUX_DATA_SIZE,
 			 (((SIZE_AUX) >> 4) << 16) | 0);
+	if (multi)
+		amvdec_write_dos(core, HEVC_STREAM_SWAP_BUFFER2,
+				 hevc->fw_swap_paddr);
 	return 0;
 
 free_hevc:
