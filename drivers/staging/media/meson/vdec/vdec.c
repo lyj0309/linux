@@ -109,6 +109,8 @@ static int vdec_poweron(struct amvdec_session *sess)
 	}
 
 	esparser_power_up(sess);
+	if (codec_ops->run)
+		codec_ops->run(sess);
 
 	return 0;
 
@@ -186,6 +188,10 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 	disable_irq(core->vdec_irq);
 	mutex_lock(&core->hw_lock);
+	if (!atomic_read(&sess->m2m_job_running)) {
+		ret = -ECANCELED;
+		goto unlock;
+	}
 	if (core->cur_sess == sess)
 		goto unlock;
 	if (core->cur_sess) {
@@ -214,14 +220,12 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 	if (synchronize)
 		disable_irq(core->vdec_irq);
 
-	mutex_lock(&sess->lock);
 	mutex_lock(&core->hw_lock);
 	if (core->cur_sess == sess) {
 		vdec_suspend(sess);
 		vdec_set_current_session(core, NULL);
 	}
 	mutex_unlock(&core->hw_lock);
-	mutex_unlock(&sess->lock);
 
 	if (synchronize)
 		enable_irq(core->vdec_irq);
@@ -411,6 +415,9 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 
 	if (!sess->streamon_out)
 		return;
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	    atomic_read(&sess->m2m_job_running))
+		schedule_work(&sess->esparser_queue_work);
 
 	if (sess->streamon_cap &&
 	    vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
@@ -906,6 +913,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
 		v4l2_m2m_clear_state(sess->m2m_ctx);
 		sess->should_stop = 0;
+		sess->draining = false;
 		return 0;
 	}
 
@@ -914,6 +922,14 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		return -EINVAL;
 
 	dev_dbg(dev, "Received V4L2_DEC_CMD_STOP\n");
+
+	if (codec_ops->async_drain &&
+	    (atomic_read(&sess->m2m_job_running) ||
+	     v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx))) {
+		sess->draining = true;
+		v4l2_m2m_try_schedule(sess->m2m_ctx);
+		return 0;
+	}
 
 	sess->should_stop = 1;
 
