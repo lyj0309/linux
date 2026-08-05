@@ -271,6 +271,7 @@ static void vdec_m2m_job_abort(void *priv)
 {
 	struct amvdec_session *sess = priv;
 
+	/* The queue lock may be held while the worker is waiting for it. */
 	cancel_work(&sess->esparser_queue_work);
 	vdec_m2m_complete_job(sess, true);
 }
@@ -1129,7 +1130,9 @@ static int vdec_close(struct file *file)
 {
 	struct amvdec_session *sess = file_to_amvdec_session(file);
 
+	mutex_lock(&sess->lock);
 	v4l2_m2m_ctx_release(sess->m2m_ctx);
+	mutex_unlock(&sess->lock);
 	cancel_work_sync(&sess->esparser_queue_work);
 	v4l2_fh_del(&sess->fh, file);
 	v4l2_fh_exit(&sess->fh);
