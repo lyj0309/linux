@@ -1836,8 +1836,10 @@ static void codec_hevc_finish_job(struct amvdec_session *sess)
 	hevc->start_decoding_flag |= decode_info & 0xff;
 	hevc->rps_set_id = (decode_info >> 8) & 0xff;
 	WRITE_ONCE(hevc->input_pending, false);
-	if (!hevc->input_has_frame && !amvdec_take_ts(sess, &timestamp))
+	if (!hevc->input_has_frame) {
+		amvdec_take_ts(sess, &timestamp);
 		atomic_dec_if_positive(&sess->esparser_queued_bufs);
+	}
 	codec_hevc_show_frames(sess);
 
 	last_input = sess->draining &&
