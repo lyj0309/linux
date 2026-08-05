@@ -393,12 +393,8 @@ static int codec_hevc_update_frame_refs(struct amvdec_session *sess,
 	struct codec_hevc *hevc = sess->priv;
 	union rpm_param *params = &hevc->rpm_param;
 	u32 rps_used_bit = hevc->rps_used_bit;
-	int num_ref_idx_l0_active =
-		(params->p.num_ref_idx_l0_active > MAX_REF_ACTIVE) ?
-		MAX_REF_ACTIVE : params->p.num_ref_idx_l0_active;
-	int num_ref_idx_l1_active =
-		(params->p.num_ref_idx_l1_active > MAX_REF_ACTIVE) ?
-		MAX_REF_ACTIVE : params->p.num_ref_idx_l1_active;
+	int num_ref_idx_l0_active = params->p.num_ref_idx_l0_active;
+	int num_ref_idx_l1_active = params->p.num_ref_idx_l1_active;
 	int ref_picset0[MAX_REF_ACTIVE] = { 0 };
 	int ref_picset1[MAX_REF_ACTIVE] = { 0 };
 	u16 *mod_list = params->p.modification_list;
@@ -1585,6 +1581,8 @@ static int codec_hevc_process_segment_header(struct amvdec_session *sess)
 		return -EINVAL;
 	max_poc_lsb = BIT(param->p.log2_max_pic_order_cnt_lsb_minus4 + 4);
 	if (param->p.slice_type > I_SLICE ||
+	    param->p.num_ref_idx_l0_active > MAX_REF_ACTIVE ||
+	    param->p.num_ref_idx_l1_active > MAX_REF_ACTIVE ||
 	    !hevc->lcu_total || slice_segment_address >= hevc->lcu_total ||
 	    param->p.POClsb >= max_poc_lsb ||
 	    !(param->p.m_temporalId & 0x7) ||
