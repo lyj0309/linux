@@ -1454,6 +1454,7 @@ static irqreturn_t codec_hevc_isr(struct amvdec_session *sess)
 
 struct amvdec_codec_ops codec_hevc_ops = {
 	.start = codec_hevc_start,
+	.async_drain = true,
 	.stop = codec_hevc_stop,
 	.isr = codec_hevc_isr,
 	.threaded_isr = codec_hevc_threaded_isr,

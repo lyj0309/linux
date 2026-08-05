@@ -355,5 +355,6 @@ int amvdec_m2m_job_start(struct amvdec_session *sess);
 void amvdec_m2m_job_finish(struct amvdec_session *sess);
 void amvdec_m2m_job_yield(struct amvdec_session *sess);
 void amvdec_m2m_retry_job(struct amvdec_session *sess);
+void amvdec_m2m_finish_drain(struct amvdec_session *sess);
 
 #endif
