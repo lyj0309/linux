@@ -422,21 +422,21 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 	return 0;
 }
 
-static void codec_h264_multi_run(struct amvdec_session *sess)
+static int codec_h264_multi_run(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 
 	if (!h264 || h264->slice_pending)
-		return;
+		return 0;
 	if (h264->resume_pending) {
 		h264->resume_pending = false;
 		amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
 				 H264_MULTI_ACTION_SEARCH_HEAD);
-		return;
+		return 0;
 	}
 	if (!h264->input_pending) {
 		WRITE_ONCE(h264->waiting_for_input, true);
-		return;
+		return 0;
 	}
 	if (!h264->config_valid && !h264->config_search_valid) {
 		h264->config_search_rp = amvdec_read_dos(sess->core,
@@ -446,6 +446,8 @@ static void codec_h264_multi_run(struct amvdec_session *sess)
 
 	amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
 			 H264_MULTI_ACTION_SEARCH_HEAD);
+
+	return 0;
 }
 
 static void codec_h264_multi_input_queued(struct amvdec_session *sess,
@@ -503,24 +505,26 @@ static int codec_h264_multi_stop(struct amvdec_session *sess)
 	return 0;
 }
 
-static void codec_h264_multi_resume(struct amvdec_session *sess)
+static int codec_h264_multi_resume(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	struct amvdec_core *core = sess->core;
 	unsigned long flags;
 	bool active;
+	int ret;
 
 	if (!h264)
-		return;
+		return -EINVAL;
 
 	spin_lock_irqsave(&core->irq_lock, flags);
 	active = core->cur_sess == sess;
 	spin_unlock_irqrestore(&core->irq_lock, flags);
 
 	if (active) {
-		if (codec_h264_multi_setup_canvases(sess)) {
+		ret = codec_h264_multi_setup_canvases(sess);
+		if (ret) {
 			amvdec_abort(sess);
-			return;
+			return ret;
 		}
 	}
 	if (active && !h264->configuring) {
@@ -529,6 +533,8 @@ static void codec_h264_multi_resume(struct amvdec_session *sess)
 	} else {
 		h264->resume_pending = true;
 	}
+
+	return 0;
 }
 
 static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)

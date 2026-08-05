@@ -287,7 +287,7 @@ static void codec_h264_set_par(struct amvdec_session *sess)
 	sess->pixelaspect = par_table[ar_idc];
 }
 
-static void codec_h264_resume(struct amvdec_session *sess)
+static int codec_h264_resume(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct codec_h264 *h264 = sess->priv;
@@ -313,7 +313,7 @@ static void codec_h264_resume(struct amvdec_session *sess)
 					     &h264->ref_paddr, GFP_KERNEL);
 	if (!h264->ref_vaddr) {
 		amvdec_abort(sess);
-		return;
+		return -ENOMEM;
 	}
 
 	/* Address to store the references' MVs */
@@ -324,6 +324,8 @@ static void codec_h264_resume(struct amvdec_session *sess)
 	amvdec_write_dos(core, AV_SCRATCH_0, (h264->max_refs << 24) |
 					     (sess->num_dst_bufs << 16) |
 					     ((h264->max_refs - 1) << 8));
+
+	return 0;
 }
 
 /*

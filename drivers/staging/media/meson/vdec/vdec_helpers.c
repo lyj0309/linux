@@ -588,8 +588,12 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 
 	/* Keep decoding if the active capture queue can hold the new format. */
 	if (sess->streamon_cap && capture_ready) {
-		sess->fmt_out->codec_ops->resume(sess);
-		sess->status = STATUS_RUNNING;
+		if (!sess->fmt_out->codec_ops->resume(sess)) {
+			sess->status = STATUS_RUNNING;
+		} else {
+			sess->status = STATUS_NEEDS_RESUME;
+			sess->changed_format = true;
+		}
 	} else {
 		sess->status = STATUS_NEEDS_RESUME;
 		/* A compatible queue may have been allocated before this event. */

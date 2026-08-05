@@ -1342,15 +1342,17 @@ static void codec_vp9_process_lf(struct codec_vp9 *vp9)
 				: (param->p.seg_lf_info[i] & 0x3f);
 }
 
-static void codec_vp9_resume(struct amvdec_session *sess)
+static int codec_vp9_resume(struct amvdec_session *sess)
 {
 	struct codec_vp9 *vp9 = sess->priv;
+	int ret;
 
 	mutex_lock(&vp9->lock);
-	if (codec_hevc_setup_buffers(sess, &vp9->common, vp9->is_10bit)) {
+	ret = codec_hevc_setup_buffers(sess, &vp9->common, vp9->is_10bit);
+	if (ret) {
 		mutex_unlock(&vp9->lock);
 		amvdec_abort(sess);
-		return;
+		return ret;
 	}
 
 	codec_vp9_setup_workspace(sess, vp9);
@@ -1359,6 +1361,8 @@ static void codec_vp9_resume(struct amvdec_session *sess)
 	codec_vp9_process_frame(sess);
 
 	mutex_unlock(&vp9->lock);
+
+	return 0;
 }
 
 /*
