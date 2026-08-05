@@ -8,6 +8,8 @@
 #define __MESON_VDEC_DOS_REGS_H_
 
 /* DOS registers */
+#define VDEC_ASSIST_MMC_CTRL1	0x0008
+#define VDEC_ASSIST_CANVAS_BLK32	0x0014
 #define VDEC_ASSIST_AMR1_INT8	0x00b4
 
 #define ASSIST_MBOX1_CLR_REG	0x01d4
@@ -23,7 +25,9 @@
 #define LMEM_DMA_CTRL		0x0d40
 
 #define MC_STATUS0		0x2424
+#define MC_CTRL0		0x241c
 #define MC_CTRL1		0x242c
+#define MC_CTRL2		0x253c
 
 #define PSCALE_RST		0x2440
 #define PSCALE_CTRL		0x2444
@@ -32,6 +36,7 @@
 
 #define DBLK_CTRL		0x2544
 #define DBLK_STATUS		0x254c
+#define DBLK_RST		0x2540
 
 #define GCLK_EN			0x260c
 #define MDEC_PIC_DC_MUX_CTRL	0x2634
@@ -63,15 +68,25 @@
 #define AV_SCRATCH_J		0x274c
 #define AV_SCRATCH_K		0x2750
 #define AV_SCRATCH_L		0x2754
+#define AV_SCRATCH_M		0x2758
+#define AV_SCRATCH_N		0x275c
 #define MDEC_EXTIF_CFG1		0x2794
+#define MDEC_EXTIF_CFG2		0x2798
 
 #define MPEG1_2_REG		0x3004
 #define PIC_HEAD_INFO		0x300c
 #define POWER_CTL_VLD		0x3020
 #define VLD_DECODE_CONTROL	0x3060
+#define VIFF_BIT_CNT		0x3068
 #define M4_CONTROL_REG		0x30a4
 #define VCOP_CTRL_REG		0x3800
+#define NON_I_QUANT_MATRIX	0x380c
+#define RV_AI_MB_COUNT		0x3830
 #define IQIDCT_CONTROL		0x3838
+#define DCAC_DDR_BYTE64_CTL	0x3874
+#define I_PIC_MB_COUNT_HW	0x3884
+#define DCAC_DMA_HW_BUFF_START	0x3890
+#define DCAC_DMA_HW_CTL		0x3898
 
 /* Stream Buffer (stbuf) regs */
 #define VLD_MEM_VIFIFO_START_PTR	0x3100
