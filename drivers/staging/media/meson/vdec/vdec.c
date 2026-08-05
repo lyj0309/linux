@@ -43,6 +43,18 @@ u32 amvdec_get_output_size(struct amvdec_session *sess)
 }
 EXPORT_SYMBOL_GPL(amvdec_get_output_size);
 
+static void vdec_set_current_session(struct amvdec_core *core,
+				     struct amvdec_session *sess)
+{
+	unsigned long flags;
+
+	lockdep_assert_held(&core->hw_lock);
+
+	spin_lock_irqsave(&core->irq_lock, flags);
+	core->cur_sess = sess;
+	spin_unlock_irqrestore(&core->irq_lock, flags);
+}
+
 static int vdec_codec_needs_recycle(struct amvdec_session *sess)
 {
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
@@ -371,20 +383,25 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	atomic_set(&sess->esparser_queued_bufs, 0);
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, 1);
 
-	ret = vdec_poweron(sess);
-	if (ret)
-		goto vififo_free;
-
 	sess->sequence_cap = 0;
 	sess->sequence_out = 0;
+	sess->status = STATUS_INIT;
+	disable_irq(core->vdec_irq);
+	vdec_set_current_session(core, sess);
+
+	ret = vdec_poweron(sess);
+	if (ret) {
+		vdec_set_current_session(core, NULL);
+		enable_irq(core->vdec_irq);
+		sess->status = STATUS_STOPPED;
+		goto vififo_free;
+	}
+	enable_irq(core->vdec_irq);
+
 	if (vdec_codec_needs_recycle(sess))
 		sess->recycle_thread = kthread_run(vdec_recycle_thread, sess,
 						   "vdec_recycle");
 
-	sess->status = STATUS_INIT;
-	spin_lock_irq(&core->irq_lock);
-	core->cur_sess = sess;
-	spin_unlock_irq(&core->irq_lock);
 	goto unlock_ok;
 
 vififo_free:
@@ -456,9 +473,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 			kthread_stop(sess->recycle_thread);
 
 		disable_irq(core->vdec_irq);
-		spin_lock_irq(&core->irq_lock);
-		core->cur_sess = NULL;
-		spin_unlock_irq(&core->irq_lock);
+		vdec_set_current_session(core, NULL);
 		vdec_poweroff(sess);
 		enable_irq(core->vdec_irq);
 		vdec_free_canvas(sess);
