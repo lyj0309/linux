@@ -894,7 +894,10 @@ static void codec_vp9_set_sao(struct amvdec_session *sess,
 	dma_addr_t buf_u_v_paddr;
 	u32 val;
 
-	if (codec_hevc_use_downsample(sess->pixfmt_cap, vp9->is_10bit))
+	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
+			       vp9->is_10bit))
+		buf_y_paddr = 0;
+	else if (codec_hevc_use_downsample(sess->pixfmt_cap, vp9->is_10bit))
 		buf_y_paddr =
 			vp9->common.fbc_buffer_paddr[vb->index];
 	else

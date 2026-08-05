@@ -1010,9 +1010,10 @@ codec_hevc_set_sao(struct amvdec_session *sess, struct hevc_frame *frame)
 	amvdec_write_dos(core, HEVC_SAO_PIC_SIZE_LCU,
 			 (hevc->lcu_x_num - 1) | (hevc->lcu_y_num - 1) << 16);
 
-	if (codec_hevc_use_downsample(sess->pixfmt_cap, hevc->is_10bit) ||
-	    codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
+	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
 			       hevc->is_10bit))
+		buf_y_paddr = 0;
+	else if (codec_hevc_use_downsample(sess->pixfmt_cap, hevc->is_10bit))
 		buf_y_paddr =
 		     hevc->common.fbc_buffer_paddr[vb->index];
 	else
