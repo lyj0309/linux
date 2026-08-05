@@ -1867,6 +1867,7 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		dev_err(core->dev_dec, "Unrecognized dec_status: %08X\n",
 			dec_status);
 		amvdec_abort(sess);
+		amvdec_m2m_job_yield(sess);
 		goto unlock;
 	}
 
@@ -1875,6 +1876,7 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	ret = codec_hevc_process_rpm(sess);
 	if (ret < 0) {
 		amvdec_abort(sess);
+		amvdec_m2m_job_yield(sess);
 		goto unlock;
 	}
 	if (ret > 0) {
@@ -1887,8 +1889,10 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	}
 
 	codec_hevc_process_segment_header(sess);
-	if (codec_hevc_process_segment(sess))
+	if (codec_hevc_process_segment(sess)) {
 		amvdec_abort(sess);
+		amvdec_m2m_job_yield(sess);
+	}
 
 unlock:
 	mutex_unlock(&hevc->lock);
