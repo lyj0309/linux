@@ -28,7 +28,7 @@ static void h264_multi_poc_type0_wrap_test(struct kunit *test)
 	struct h264_multi_poc poc;
 
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &picture, &poc), 0);
+						    &picture, &poc), 0);
 	KUNIT_EXPECT_EQ(test, poc.top, 17);
 	KUNIT_EXPECT_EQ(test, poc.bottom, 17);
 }
@@ -48,7 +48,7 @@ static void h264_multi_poc_non_ref_commit_test(struct kunit *test)
 	struct h264_multi_poc poc;
 
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &picture, &poc), 0);
+						    &picture, &poc), 0);
 	h264_multi_poc_commit(&state, &config, &picture, &poc, false);
 	KUNIT_EXPECT_EQ(test, state.prev_pic_order_cnt_msb, 16);
 	KUNIT_EXPECT_EQ(test, state.prev_pic_order_cnt_lsb, 4);
@@ -71,11 +71,11 @@ static void h264_multi_poc_mmco5_test(struct kunit *test)
 	struct h264_multi_poc poc;
 
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &picture, &poc), 0);
+						    &picture, &poc), 0);
 	h264_multi_poc_commit(&state, &config, &picture, &poc, true);
 	KUNIT_EXPECT_EQ(test, state.prev_top_field_order_cnt, 10);
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &next, &poc), 0);
+						    &next, &poc), 0);
 	KUNIT_EXPECT_EQ(test, poc.top, 17);
 }
 
@@ -93,7 +93,7 @@ static void h264_multi_poc_type1_cycle_test(struct kunit *test)
 	config.offset_for_ref_frame[0] = 2;
 	config.offset_for_ref_frame[1] = 2;
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &picture, &poc), 0);
+						    &picture, &poc), 0);
 	KUNIT_EXPECT_EQ(test, poc.top, 4);
 	KUNIT_EXPECT_EQ(test, poc.bottom, 4);
 }
@@ -111,7 +111,7 @@ static void h264_multi_poc_type2_frame_wrap_test(struct kunit *test)
 	struct h264_multi_poc poc;
 
 	KUNIT_ASSERT_EQ(test, h264_multi_poc_derive(&state, &config,
-						     &picture, &poc), 0);
+						    &picture, &poc), 0);
 	KUNIT_EXPECT_EQ(test, poc.top, 34);
 	KUNIT_EXPECT_EQ(test, poc.bottom, 34);
 }
@@ -189,9 +189,9 @@ static void h264_multi_dpb_decode_ref(struct kunit *test,
 	struct h264_multi_poc poc;
 
 	KUNIT_ASSERT_EQ(test, h264_multi_dpb_begin(dpb, config, &picture,
-						    &poc), 0);
+						   &poc), 0);
 	KUNIT_ASSERT_EQ(test, h264_multi_dpb_finish(dpb, config, &picture,
-						     marking, &poc,
+						    marking, &poc,
 						     reference_ts,
 						     reference_ts), 0);
 }
