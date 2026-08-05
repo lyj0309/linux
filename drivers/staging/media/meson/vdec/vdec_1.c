@@ -21,6 +21,7 @@
 	#define GEN_PWR_VDEC_1_SM1 (BIT(1))
 
 #define MC_SIZE			(4096 * 4)
+#define VDEC_1_QUIESCE_RETRIES	2000
 
 static int
 vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
@@ -152,6 +153,27 @@ static bool vdec_1_stbuf_pointer_valid(struct amvdec_session *sess, u32 ptr)
 	return ptr >= start && ptr <= end;
 }
 
+static void vdec_1_quiesce(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	u32 rp, previous_rp;
+	unsigned int i;
+
+	amvdec_write_dos(core, MPSR, 0);
+	amvdec_write_dos(core, CPSR, 0);
+
+	previous_rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+	for (i = 0; i < VDEC_1_QUIESCE_RETRIES; i++) {
+		usleep_range(30, 60);
+		rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+		if (rp == previous_rp)
+			return;
+		previous_rp = rp;
+	}
+
+	dev_warn(core->dev, "VIFIFO read pointer did not become stable\n");
+}
+
 static void vdec_1_save_stbuf_context(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -182,8 +204,10 @@ static void __vdec_1_stop(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
-	if (codec_ops->context_switching)
+	if (codec_ops->context_switching) {
+		vdec_1_quiesce(sess);
 		vdec_1_save_stbuf_context(sess);
+	}
 
 	if (sess->priv)
 		codec_ops->stop(sess);
