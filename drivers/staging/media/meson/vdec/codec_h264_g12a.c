@@ -60,8 +60,9 @@
 #define H264_MULTI_CO_MB_RW_CTL		0x30f4
 
 #define H264_MULTI_CO_MB_SIZE		96
+#define H264_MULTI_MIN_STREAM_LEVEL	0x200
 
-#define H264_MULTI_DECODE_MODE_FRAME	1
+#define H264_MULTI_DECODE_MODE_STREAM	2
 
 enum h264_multi_fw_page {
 	H264_MULTI_FW_MAIN_0,
@@ -125,7 +126,6 @@ struct codec_h264_multi {
 	u32 frame_counter;
 	u32 decode_seqinfo;
 	u32 irq_status;
-	u32 input_size;
 	u32 config_search_rp;
 	unsigned int capture_buf_count;
 	bool config_valid;
@@ -353,6 +353,7 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 {
 	struct codec_h264_multi *h264 = sess->priv;
 	struct amvdec_core *core = sess->core;
+	u32 input_size;
 	int ret;
 
 	if (!h264)
@@ -372,10 +373,11 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, AV_SCRATCH_G, h264->fw_swap_paddr);
 	amvdec_write_dos(core, H264_MULTI_LMEM_ADDR, h264->lmem_paddr);
 	amvdec_write_dos(core, M4_CONTROL_REG, BIT(13));
+	input_size = amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
 	amvdec_write_dos(core, H264_MULTI_DECODE_SIZE,
-			 h264->input_size ?: S32_MAX);
+			 input_size ?: S32_MAX);
 	amvdec_write_dos(core, VIFF_BIT_CNT,
-			 (h264->input_size ?: S32_MAX) * 8U);
+			 (input_size ?: S32_MAX) * 8U);
 	amvdec_write_dos(core, AV_SCRATCH_M, 1);
 	amvdec_write_dos(core, AV_SCRATCH_N, 0);
 	amvdec_write_dos(core, AV_SCRATCH_F,
@@ -396,7 +398,7 @@ static int codec_h264_multi_start(struct amvdec_session *sess)
 	}
 
 	amvdec_write_dos(core, H264_MULTI_DECODE_MODE,
-			 H264_MULTI_DECODE_MODE_FRAME);
+			 H264_MULTI_DECODE_MODE_STREAM);
 	amvdec_write_dos(core, H264_MULTI_DECODE_SEQINFO,
 			 h264->decode_seqinfo);
 	amvdec_write_dos(core, H264_MULTI_HEAD_PADDING, 0);
@@ -443,7 +445,6 @@ static int codec_h264_multi_run(struct amvdec_session *sess)
 							 VLD_MEM_VIFIFO_RP);
 		h264->config_search_valid = true;
 	}
-
 	amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
 			 H264_MULTI_ACTION_SEARCH_HEAD);
 
@@ -458,13 +459,12 @@ static void codec_h264_multi_input_queued(struct amvdec_session *sess,
 	if (!h264)
 		return;
 
-	h264->input_size = payload_size;
 	h264->input_pending = true;
-	amvdec_write_dos(sess->core, H264_MULTI_DECODE_SIZE, payload_size);
-	amvdec_write_dos(sess->core, VIFF_BIT_CNT, payload_size * 8);
 	if (!READ_ONCE(h264->waiting_for_input))
 		return;
 
+	amvdec_write_dos(sess->core, H264_MULTI_DECODE_SIZE, payload_size);
+	amvdec_write_dos(sess->core, VIFF_BIT_CNT, payload_size * 8);
 	if (!h264->config_valid && !h264->config_search_valid) {
 		h264->config_search_rp = amvdec_read_dos(sess->core,
 							 VLD_MEM_VIFIFO_RP);
@@ -473,13 +473,6 @@ static void codec_h264_multi_input_queued(struct amvdec_session *sess,
 	WRITE_ONCE(h264->waiting_for_input, false);
 	amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
 			 H264_MULTI_ACTION_SEARCH_HEAD);
-}
-
-static bool codec_h264_multi_can_queue_input(struct amvdec_session *sess)
-{
-	struct codec_h264_multi *h264 = sess->priv;
-
-	return h264 && !READ_ONCE(h264->input_pending);
 }
 
 static int codec_h264_multi_stop(struct amvdec_session *sess)
@@ -498,10 +491,10 @@ static int codec_h264_multi_stop(struct amvdec_session *sess)
 	if (h264->restore_config_rp) {
 		sess->vififo_curr = h264->config_search_rp;
 		sess->vififo_rp = h264->config_search_rp;
+		sess->vififo_swap_valid = false;
 		h264->restore_config_rp = false;
 		h264->config_search_valid = false;
 	}
-
 	return 0;
 }
 
@@ -550,7 +543,6 @@ static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
 	amvdec_write_dos(sess->core, ASSIST_MBOX1_CLR_REG, 1);
 	if (status == H264_MULTI_CONFIG_REQUEST)
 		h264->restore_config_rp = true;
-
 	return IRQ_WAKE_THREAD;
 }
 
@@ -733,8 +725,12 @@ static int codec_h264_multi_configure_references(struct amvdec_session *sess)
 		l0_count = picture->num_ref_idx_l0_active;
 	}
 	if (l0_count > ARRAY_SIZE(h264->ref_list0) ||
-	    l1_count > ARRAY_SIZE(h264->ref_list1))
+	    l1_count > ARRAY_SIZE(h264->ref_list1)) {
+		dev_err(sess->core->dev,
+			"invalid H.264 reference counts: L0=%u L1=%u\n",
+			l0_count, l1_count);
 		return -EINVAL;
+	}
 	if (l0_count) {
 		ret = h264_multi_dpb_reorder_reflist(&h264->dpb,
 						     &h264->config, picture,
@@ -743,8 +739,12 @@ static int codec_h264_multi_configure_references(struct amvdec_session *sess)
 						     l0_count,
 						     h264->lmem.data.mmco.l0_reorder,
 						     H264_MULTI_LMEM_REORDER_WORDS);
-		if (ret)
+		if (ret) {
+			dev_err(sess->core->dev,
+				"unable to reorder H.264 L0 references: %d\n",
+				ret);
 			return ret;
+		}
 	}
 	if (l1_count) {
 		ret = h264_multi_dpb_reorder_reflist(&h264->dpb,
@@ -754,16 +754,27 @@ static int codec_h264_multi_configure_references(struct amvdec_session *sess)
 						     l1_count,
 						     h264->lmem.data.mmco.l1_reorder,
 						     H264_MULTI_LMEM_REORDER_WORDS);
-		if (ret)
+		if (ret) {
+			dev_err(sess->core->dev,
+				"unable to reorder H.264 L1 references: %d\n", ret);
 			return ret;
+		}
 	}
 
 	amvdec_write_dos(sess->core, H264_MULTI_BUFFER_INFO_INDEX, 0);
 	ret = codec_h264_multi_write_ref_list(sess, h264->ref_list0, l0_count);
-	if (ret)
+	if (ret) {
+		dev_err(sess->core->dev,
+			"unable to write H.264 L0 references: %d\n", ret);
 		return ret;
+	}
 	amvdec_write_dos(sess->core, H264_MULTI_BUFFER_INFO_INDEX, 8);
-	return codec_h264_multi_write_ref_list(sess, h264->ref_list1, l1_count);
+	ret = codec_h264_multi_write_ref_list(sess, h264->ref_list1, l1_count);
+	if (ret)
+		dev_err(sess->core->dev,
+			"unable to write H.264 L1 references: %d\n", ret);
+
+	return ret;
 }
 
 static int codec_h264_multi_configure_mv(struct amvdec_session *sess)
@@ -911,7 +922,8 @@ static bool codec_h264_multi_job_ready(struct amvdec_session *sess)
 		return false;
 	if (READ_ONCE(h264->resume_pending))
 		return true;
-	if (!READ_ONCE(h264->slice_pending))
+	if (!READ_ONCE(h264->slice_pending) &&
+	    !READ_ONCE(h264->input_pending))
 		return false;
 
 	spin_lock_irqsave(&queue->rdy_spinlock, flags);
@@ -935,7 +947,35 @@ static bool codec_h264_multi_has_pending_job(struct amvdec_session *sess)
 	struct codec_h264_multi *h264 = sess->priv;
 
 	return h264 && (READ_ONCE(h264->resume_pending) ||
-			READ_ONCE(h264->slice_pending));
+			READ_ONCE(h264->slice_pending) ||
+			READ_ONCE(h264->input_pending));
+}
+
+static bool codec_h264_multi_has_queued_input(struct amvdec_session *sess)
+{
+	unsigned long flags;
+	bool queued;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	queued = !list_empty(&sess->timestamps);
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+
+	return queued;
+}
+
+static bool codec_h264_multi_is_last_input(struct amvdec_session *sess)
+{
+	return sess->draining &&
+		!v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) &&
+		!codec_h264_multi_has_queued_input(sess);
+}
+
+static void codec_h264_multi_finish_drain(struct amvdec_session *sess)
+{
+	sess->should_stop = 1;
+	codec_h264_multi_flush_output(sess);
+	v4l2_m2m_mark_stopped(sess->m2m_ctx);
+	sess->draining = false;
 }
 
 static int
@@ -1001,11 +1041,17 @@ codec_h264_multi_configure_picture(struct amvdec_session *sess,
 		}
 	}
 	ret = codec_h264_multi_configure_references(sess);
-	if (ret)
+	if (ret) {
+		dev_err(core->dev, "unable to configure H.264 references: %d\n",
+			ret);
 		return ret;
+	}
 	ret = codec_h264_multi_configure_mv(sess);
-	if (ret)
+	if (ret) {
+		dev_err(core->dev, "unable to configure H.264 MV state: %d\n",
+			ret);
 		return ret;
+	}
 	fw_action = action == H264_MULTI_SLICE_NEW_PICTURE ?
 		H264_MULTI_ACTION_DECODE_NEWPIC :
 		H264_MULTI_ACTION_DECODE_SLICE;
@@ -1034,6 +1080,10 @@ codec_h264_multi_process_picture(struct amvdec_session *sess,
 	ret = h264_multi_dpb_picture_begin(&h264->dpb, &h264->config,
 					   &h264->pic_state, picture,
 					   buffer_index, &action);
+	if (ret)
+		dev_err(sess->core->dev,
+			"unable to begin H.264 picture: %d (active=%u first_mb=%u)\n",
+			ret, h264->pic_state.active, picture->first_mb_in_slice);
 	if (!ret && vbuf)
 		h264->pic_state.vbuf = vbuf;
 	if (!ret)
@@ -1138,7 +1188,6 @@ static int codec_h264_multi_finish_picture(struct amvdec_session *sess)
 		h264_multi_dpb_picture_reset(&h264->pic_state);
 		goto free_frame;
 	}
-
 	codec_h264_multi_queue_frame(sess, frame,
 				     h264->pic_marking.no_output_of_prior_pics);
 	return 0;
@@ -1218,19 +1267,25 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 	if (status == H264_MULTI_SLICE_HEAD_DONE) {
 		struct h264_multi_picture picture;
 		struct h264_multi_marking marking;
+		const char *operation = "parse picture";
 		int ret;
 
 		ret = codec_h264_multi_parse_picture(sess, &picture);
-		if (!ret && !picture.first_mb_in_slice)
+		if (!ret && !picture.first_mb_in_slice) {
+			operation = "parse marking";
 			ret = codec_h264_multi_parse_marking(sess, &marking);
+		}
 		if (!ret && !picture.first_mb_in_slice &&
 		    h264->pic_state.active) {
+			operation = "finish previous picture";
 			ret = codec_h264_multi_finish_picture(sess);
 			if (!ret)
 				h264->pic_done_pending = true;
 		}
-		if (!ret)
+		if (!ret) {
+			operation = "process picture";
 			ret = codec_h264_multi_process_picture(sess, &picture);
+		}
 		if (!ret && !picture.first_mb_in_slice)
 			h264->pic_marking = marking;
 		if (ret == -ENOBUFS) {
@@ -1241,30 +1296,54 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 		}
 		if (ret) {
 			dev_err(sess->core->dev,
-				"invalid H.264 picture state: %d\n", ret);
+				"unable to %s: %d\n", operation, ret);
 			amvdec_abort(sess);
 			amvdec_m2m_job_yield(sess);
 		}
 		return IRQ_HANDLED;
 	}
 
-	if (status == H264_MULTI_PIC_DATA_DONE ||
-	    status == H264_MULTI_DATA_REQUEST ||
+	if (status == H264_MULTI_DATA_REQUEST ||
 	    status == H264_MULTI_DECODE_BUFEMPTY) {
-		bool last_input = sess->draining &&
-			!v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx);
+		bool input_available;
+		u32 level;
+		int ret = 0;
+
+		level = amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_LEVEL);
+		input_available = level > H264_MULTI_MIN_STREAM_LEVEL;
+		if (input_available) {
+			amvdec_write_dos(sess->core, H264_MULTI_DECODE_SIZE, level);
+			amvdec_write_dos(sess->core, VIFF_BIT_CNT, level * 8U);
+			amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
+					 H264_MULTI_ACTION_SEARCH_HEAD);
+			return IRQ_HANDLED;
+		}
+		if (sess->draining &&
+		    !v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) &&
+		    h264->pic_state.active)
+			ret = codec_h264_multi_finish_picture(sess);
+		if (ret) {
+			dev_err(sess->core->dev,
+				"unable to finish trailing H.264 picture: %d\n",
+				ret);
+			amvdec_abort(sess);
+		}
+		h264->input_pending = false;
+		if (!ret && codec_h264_multi_is_last_input(sess))
+			codec_h264_multi_finish_drain(sess);
+		amvdec_m2m_job_yield(sess);
+		return IRQ_HANDLED;
+	}
+
+	if (status == H264_MULTI_PIC_DATA_DONE) {
 		int ret;
 
-		h264->input_pending = false;
-		if (last_input)
-			sess->should_stop = 1;
 		if (h264->pic_done_pending) {
 			h264->pic_done_pending = false;
-			if (last_input) {
-				codec_h264_multi_flush_output(sess);
-				v4l2_m2m_mark_stopped(sess->m2m_ctx);
-				sess->draining = false;
-			}
+			h264->input_pending =
+				codec_h264_multi_has_queued_input(sess);
+			if (codec_h264_multi_is_last_input(sess))
+				codec_h264_multi_finish_drain(sess);
 			amvdec_m2m_job_yield(sess);
 			return IRQ_HANDLED;
 		}
@@ -1274,11 +1353,9 @@ static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
 				"unable to finish H.264 picture: %d\n", ret);
 			amvdec_abort(sess);
 		}
-		if (last_input) {
-			codec_h264_multi_flush_output(sess);
-			v4l2_m2m_mark_stopped(sess->m2m_ctx);
-			sess->draining = false;
-		}
+		h264->input_pending = codec_h264_multi_has_queued_input(sess);
+		if (!ret && codec_h264_multi_is_last_input(sess))
+			codec_h264_multi_finish_drain(sess);
 		amvdec_m2m_job_yield(sess);
 	}
 
@@ -1289,11 +1366,11 @@ struct amvdec_codec_ops codec_h264_g12a_ops = {
 	.start = codec_h264_multi_start,
 	.run = codec_h264_multi_run,
 	.input_queued = codec_h264_multi_input_queued,
-	.can_queue_input = codec_h264_multi_can_queue_input,
 	.async_drain = true,
 	.stop = codec_h264_multi_stop,
 	.release = codec_h264_multi_release_firmware,
 	.context_switching = true,
+	.canvas_height_align = 16,
 	.prepare_firmware = codec_h264_multi_prepare_firmware,
 	.has_pending_job = codec_h264_multi_has_pending_job,
 	.job_ready = codec_h264_multi_job_ready,
@@ -1395,7 +1472,9 @@ int codec_h264_multi_parse_config(struct amvdec_session *sess,
 	config->bitstream_restriction =
 		!!(sps_flags & H264_MULTI_SPS_BITSTREAM_RESTRICTION);
 
-	if (config->level_idc < 9 || config->level_idc > 52 ||
+	if ((!config->level_idc && !config->bitstream_restriction) ||
+	    (config->level_idc && config->level_idc < 9) ||
+	    config->level_idc > 52 ||
 	    config->max_refs > H264_MULTI_MAX_DPB_SIZE ||
 	    config->pic_order_cnt_type > 2 ||
 	    config->num_ref_frames_in_poc_cycle > H264_MULTI_LMEM_REF_WORDS)

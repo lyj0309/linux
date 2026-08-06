@@ -2140,8 +2140,20 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 	codec_vp9_update_ref(vp9);
 
 	codec_vp9_fetch_rpm(sess);
-	if (codec_vp9_process_rpm(vp9)) {
-		amvdec_src_change(sess, vp9->width, vp9->height, 16, 8);
+	ret = codec_vp9_process_rpm(sess);
+	if (ret < 0) {
+		dev_err(core->dev_dec, "Invalid VP9 frame metadata\n");
+		amvdec_abort(sess);
+		goto unlock;
+	}
+
+	if (ret > 0) {
+		mutex_unlock(&vp9->lock);
+		amvdec_src_change(sess, vp9->width, vp9->height, 16,
+				  vp9->is_10bit ? 10 : 8);
+		mutex_lock(&vp9->lock);
+		if (sess->status == STATUS_RUNNING)
+			goto unlock;
 
 		/* No frame is actually processed */
 		vp9->cur_frame = NULL;
