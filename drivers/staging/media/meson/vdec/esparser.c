@@ -337,8 +337,9 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	 * they could pause when there is no capture buffer available and
 	 * resume on this notification.
 	 */
-	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 ||
-	    sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC) {
+	if ((sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 ||
+	     sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC) &&
+	    sess->streamon_cap) {
 		if (codec_ops->num_pending_bufs)
 			num_dst_bufs = codec_ops->num_pending_bufs(sess);
 
@@ -441,6 +442,7 @@ void esparser_queue_all_src(struct work_struct *work)
 {
 	struct amvdec_session *sess =
 		container_of(work, struct amvdec_session, esparser_queue_work);
+	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *vbuf;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	bool codec_job = false;
@@ -477,7 +479,15 @@ void esparser_queue_all_src(struct work_struct *work)
 	} else if (!vbuf) {
 		finish = !codec_job;
 	} else {
+		mutex_lock(&core->hw_lock);
+		if (!atomic_read(&sess->m2m_job_running) ||
+		    core->cur_sess != sess) {
+			mutex_unlock(&core->hw_lock);
+			mutex_unlock(&sess->lock);
+			return;
+		}
 		ret = esparser_queue(sess, vbuf);
+		mutex_unlock(&core->hw_lock);
 		/* Only a full VIFIFO is retryable with the same source buffer. */
 		finish = ret != -EAGAIN;
 		drain = !ret && sess->draining &&

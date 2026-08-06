@@ -238,17 +238,6 @@ int h264_multi_dpb_buf_count(const struct h264_multi_config *config,
 	    !config->coded_height)
 		return -EINVAL;
 
-	frame_mbs = DIV_ROUND_UP(config->coded_width, 16) *
-		DIV_ROUND_UP(config->coded_height, 16);
-	for (i = 0; i < ARRAY_SIZE(h264_level_limits); i++) {
-		if (h264_level_limits[i].level_idc == config->level_idc)
-			break;
-	}
-	if (i == ARRAY_SIZE(h264_level_limits))
-		return -EINVAL;
-
-	dpb_frames = clamp(h264_level_limits[i].max_dpb_mbs / frame_mbs,
-			   1U, (u32)H264_MULTI_DPB_SIZE);
 	if (config->bitstream_restriction) {
 		if (config->max_dec_frame_buffering > H264_MULTI_DPB_SIZE ||
 		    config->num_reorder_frames >
@@ -257,6 +246,18 @@ int h264_multi_dpb_buf_count(const struct h264_multi_config *config,
 			return -EINVAL;
 		dpb_frames = max_t(u32, 1, config->max_dec_frame_buffering);
 	} else {
+		frame_mbs = DIV_ROUND_UP(config->coded_width, 16) *
+			DIV_ROUND_UP(config->coded_height, 16);
+		for (i = 0; i < ARRAY_SIZE(h264_level_limits); i++) {
+			if (h264_level_limits[i].level_idc == config->level_idc)
+				break;
+		}
+		if (i == ARRAY_SIZE(h264_level_limits))
+			return -EINVAL;
+
+		dpb_frames = clamp(h264_level_limits[i].max_dpb_mbs /
+				   frame_mbs, 1U,
+				   (u32)H264_MULTI_DPB_SIZE);
 		dpb_frames = max_t(u32, dpb_frames, config->max_refs);
 	}
 
