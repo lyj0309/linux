@@ -633,7 +633,7 @@ static int codec_h264_multi_configure(struct amvdec_session *sess)
 
 	h264->configuring = true;
 	amvdec_src_change(sess, config.width, config.height,
-			  capture_buf_count, 8);
+			  capture_buf_count);
 	h264->configuring = false;
 	return 0;
 }
