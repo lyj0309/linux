@@ -27,9 +27,10 @@ void amvdec_clear_dos_bits(struct amvdec_core *core, u32 reg, u32 val);
 u32 amvdec_read_parser(struct amvdec_core *core, u32 reg);
 void amvdec_write_parser(struct amvdec_core *core, u32 reg, u32 val);
 
-u32 amvdec_am21c_body_size(u32 width, u32 height);
-u32 amvdec_am21c_head_size(u32 width, u32 height);
-u32 amvdec_am21c_size(u32 width, u32 height);
+/* Helpers for the Amlogic compressed framebuffer format */
+u32 amvdec_amfbc_body_size(u32 width, u32 height, u32 is_10bit, u32 use_mmu);
+u32 amvdec_amfbc_head_size(u32 width, u32 height);
+u32 amvdec_amfbc_size(u32 width, u32 height, u32 is_10bit, u32 use_mmu);
 
 /**
  * amvdec_dst_buf_done_idx() - Signal that a buffer is done decoding
@@ -40,12 +41,12 @@ u32 amvdec_am21c_size(u32 width, u32 height);
  * @field: V4L2 interlaced field
  */
 void amvdec_dst_buf_done_idx(struct amvdec_session *sess, u32 buf_idx,
-			     u32 offset, u32 field);
+			     u32 offset, u32 field, u32 type);
 void amvdec_dst_buf_done(struct amvdec_session *sess,
-			 struct vb2_v4l2_buffer *vbuf, u32 field);
+			 struct vb2_v4l2_buffer *vbuf, u32 field, u32 type);
 void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 				struct vb2_v4l2_buffer *vbuf,
-				u32 offset, u32 field, bool allow_drop);
+				u32 offset, u32 field, u32 type, bool allow_drop);
 
 /**
  * amvdec_add_ts() - Add a timestamp to the list
@@ -77,9 +78,10 @@ void amvdec_set_par_from_dar(struct amvdec_session *sess,
  * @width: picture width detected by the hardware
  * @height: picture height detected by the hardware
  * @dpb_size: Decoded Picture Buffer size (= amount of buffers for decoding)
+ * @bitdepth: Bit depth (usually 10 or 8) of the coded content
  */
 void amvdec_src_change(struct amvdec_session *sess, u32 width,
-		       u32 height, u32 dpb_size);
+		       u32 height, u32 dpb_size, u32 bitdepth);
 
 /**
  * amvdec_abort() - Abort the current decoding session

@@ -106,10 +106,18 @@ disable_dos_parser:
 
 static void vdec_wait_inactive(struct amvdec_session *sess)
 {
+	u64 deadline = get_jiffies_64() + msecs_to_jiffies(1000);
+
 	/* We consider 50ms with no IRQ to be inactive. */
 	while (time_is_after_jiffies64(sess->last_irq_jiffies +
-				       msecs_to_jiffies(50)))
+				       msecs_to_jiffies(50))) {
+		if (time_after64(get_jiffies_64(), deadline)) {
+			dev_warn(sess->core->dev,
+				 "decoder did not become inactive within 1 second\n");
+			break;
+		}
 		msleep(25);
+	}
 }
 
 static void vdec_poweroff(struct amvdec_session *sess)
@@ -503,9 +511,9 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 	switch (f->type) {
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
 		fmt_out = find_format(fmts, size, pixmp->pixelformat);
-		if (!fmt_out) {
-			pixmp->pixelformat = V4L2_PIX_FMT_MPEG2;
-			fmt_out = find_format(fmts, size, pixmp->pixelformat);
+		if (!fmt_out && size) {
+			fmt_out = &fmts[0];
+			pixmp->pixelformat = fmt_out->pixfmt;
 		}
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
@@ -514,6 +522,9 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 	default:
 		return NULL;
 	}
+
+	if (!fmt_out)
+		return NULL;
 
 	pixmp->width  = clamp(pixmp->width,  (u32)256, fmt_out->max_width);
 	pixmp->height = clamp(pixmp->height, (u32)144, fmt_out->max_height);
@@ -560,9 +571,8 @@ static int vdec_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 {
 	struct amvdec_session *sess = file_to_amvdec_session(file);
 
-	vdec_try_fmt_common(sess, sess->core->platform->num_formats, f);
-
-	return 0;
+	return vdec_try_fmt_common(sess, sess->core->platform->num_formats, f) ?
+		0 : -EINVAL;
 }
 
 static int vdec_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
@@ -587,9 +597,8 @@ static int vdec_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
 		pixmp->height = sess->height;
 	}
 
-	vdec_try_fmt_common(sess, sess->core->platform->num_formats, f);
-
-	return 0;
+	return vdec_try_fmt_common(sess, sess->core->platform->num_formats, f) ?
+		0 : -EINVAL;
 }
 
 static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)

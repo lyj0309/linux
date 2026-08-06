@@ -180,36 +180,20 @@ static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
 	return new_frame_size;
 }
 
-/* Pad the packet to at least 4KiB bytes otherwise the VDEC unit won't trigger
- * ISRs.
- * Also append a start code 000001ff at the end to trigger
- * the ESPARSER interrupt.
+/*
+ * Pad the packet to at least 4 KiB, then append 000001ff followed by zeroes
+ * so the ESPARSER finds a terminating start code within its fetch window.
  */
-static u32 esparser_pad_start_code(struct amvdec_core *core,
-				   struct vb2_buffer *vb,
-				   u32 payload_size)
+static void esparser_pad_start_code(u8 *vaddr, u32 payload_size, u32 pad_size)
 {
-	u32 pad_size = 0;
-	u8 *vaddr = vb2_plane_vaddr(vb, 0);
-
-	if (payload_size < ESPARSER_MIN_PACKET_SIZE) {
-		pad_size = ESPARSER_MIN_PACKET_SIZE - payload_size;
+	if (pad_size)
 		memset(vaddr + payload_size, 0, pad_size);
-	}
-
-	if ((payload_size + pad_size + SEARCH_PATTERN_LEN) >
-						vb2_plane_size(vb, 0)) {
-		dev_warn(core->dev, "%s: unable to pad start code\n", __func__);
-		return pad_size;
-	}
 
 	memset(vaddr + payload_size + pad_size, 0, SEARCH_PATTERN_LEN);
 	vaddr[payload_size + pad_size]     = 0x00;
 	vaddr[payload_size + pad_size + 1] = 0x00;
 	vaddr[payload_size + pad_size + 2] = 0x01;
 	vaddr[payload_size + pad_size + 3] = 0xff;
-
-	return pad_size;
 }
 
 static int
@@ -296,9 +280,16 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	u32 payload_size = vb2_get_plane_payload(vb, 0);
 	dma_addr_t phy = vb2_dma_contig_plane_dma_addr(vb, 0);
+	dma_addr_t bounce_phy = 0;
+	u8 *vaddr = vb2_plane_vaddr(vb, 0);
+	u8 *bounce_vaddr = NULL;
 	u32 num_dst_bufs = 0;
 	u32 offset;
 	u32 pad_size;
+	u32 parser_size;
+	u32 dma_size;
+	u32 wp, wp2;
+
 
 	/*
 	 * When max ref frame is held by VP9, this should be -= 3 to prevent a
@@ -308,7 +299,8 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	 * they could pause when there is no capture buffer available and
 	 * resume on this notification.
 	 */
-	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9) {
+	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 ||
+	    sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC) {
 		if (codec_ops->num_pending_bufs)
 			num_dst_bufs = codec_ops->num_pending_bufs(sess);
 
@@ -318,6 +310,7 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 		if (esparser_vififo_get_free_space(sess) < payload_size ||
 		    atomic_read(&sess->esparser_queued_bufs) >= num_dst_bufs)
 			return -EAGAIN;
+
 	} else if (esparser_vififo_get_free_space(sess) < payload_size) {
 		return -EAGAIN;
 	}
@@ -351,16 +344,49 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 		}
 	}
 
-	pad_size = esparser_pad_start_code(core, vb, payload_size);
-	ret = esparser_write_data(core, phy, payload_size + pad_size);
-
-	if (ret <= 0) {
-		dev_warn(core->dev, "esparser: input parsing error\n");
+	if (!vaddr) {
 		amvdec_remove_ts(sess, vb->timestamp);
 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		return -EFAULT;
+	}
+
+	pad_size = payload_size < ESPARSER_MIN_PACKET_SIZE ?
+		ESPARSER_MIN_PACKET_SIZE - payload_size : 0;
+	parser_size = payload_size + pad_size;
+	dma_size = parser_size + SEARCH_PATTERN_LEN;
+
+	if (dma_size > vb2_plane_size(vb, 0)) {
+		bounce_vaddr = dma_alloc_coherent(core->dev, dma_size,
+						  &bounce_phy, GFP_KERNEL);
+		if (!bounce_vaddr) {
+			amvdec_remove_ts(sess, vb->timestamp);
+			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+			return -ENOMEM;
+		}
+
+		memcpy(bounce_vaddr, vaddr, payload_size);
+		vaddr = bounce_vaddr;
+		phy = bounce_phy;
+	}
+
+	esparser_pad_start_code(vaddr, payload_size, pad_size);
+	wp = amvdec_read_parser(core, PARSER_VIDEO_WP);
+	ret = esparser_write_data(core, phy, parser_size);
+	wp2 = amvdec_read_parser(core, PARSER_VIDEO_WP);
+	if (bounce_vaddr)
+		dma_free_coherent(core->dev, dma_size, bounce_vaddr, bounce_phy);
+
+	if (ret <= 0) {
 		amvdec_write_parser(core, PARSER_FETCH_CMD, 0);
 
-		return 0;
+		if (ret < 0 || wp2 == wp) {
+			dev_err(core->dev, "esparser: input parsing error ret %d (%x <=> %x)\n",
+				ret, wp, wp2);
+			amvdec_remove_ts(sess, vb->timestamp);
+			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+
+			return 0;
+		}
 	}
 
 	atomic_inc(&sess->esparser_queued_bufs);
