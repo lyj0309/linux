@@ -1975,8 +1975,8 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	}
 	if (ret > 0) {
 		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height,
-					  hevc->dpb_size,
-					  hevc->is_10bit ? 10 : 8);
+				  hevc->dpb_size,
+				  hevc->is_10bit ? 10 : 8);
 		if (sess->status == STATUS_NEEDS_RESUME)
 			yield = true;
 		goto unlock;
