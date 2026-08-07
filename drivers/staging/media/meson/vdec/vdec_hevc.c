@@ -24,6 +24,12 @@
 
 #define MC_SIZE	(4096 * 4)
 
+/* HEVC reset domains used by the vendor frame-based decoder. */
+#define VDEC_HEVC_RESET_MASK	(BIT(3) | BIT(4) | BIT(8) | BIT(10) | \
+				 BIT(11) | BIT(12) | BIT(13) | BIT(14) | \
+				 BIT(15) | BIT(17) | BIT(18) | BIT(19) | \
+				 BIT(24) | BIT(26))
+
 static int vdec_hevc_load_firmware(struct amvdec_session *sess,
 				   const char *fwname)
 {
@@ -173,12 +179,10 @@ static int vdec_hevc_resume(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
-	bool preserve_context = codec_ops->context_switching && core->hw_sess;
 	int ret;
 
-	/* Keep per-session firmware state across frame-based context switches. */
-	amvdec_write_dos(core, DOS_SW_RESET3,
-			 preserve_context ? BIT(12) | BIT(11) : 0xffffffff);
+	/* Reset the same HEVC domains as the vendor frame-based decoder. */
+	amvdec_write_dos(core, DOS_SW_RESET3, VDEC_HEVC_RESET_MASK);
 	amvdec_write_dos(core, DOS_SW_RESET3, 0);
 	amvdec_write_dos(core, DOS_GCLK_EN3, 0xffffffff);
 
