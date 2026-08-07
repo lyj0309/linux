@@ -113,6 +113,7 @@ struct amvdec_core {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev;
 	wait_queue_head_t esparser_wq;
+	struct mutex parser_lock; /* Serializes shared parser and PFIFO access. */
 	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;

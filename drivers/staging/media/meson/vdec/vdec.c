@@ -1341,6 +1341,7 @@ static int vdec_probe(struct platform_device *pdev)
 	core->dev = dev;
 	mutex_init(&core->lock);
 	mutex_init(&core->hw_lock);
+	mutex_init(&core->parser_lock);
 	spin_lock_init(&core->irq_lock);
 	platform_set_drvdata(pdev, core);
 

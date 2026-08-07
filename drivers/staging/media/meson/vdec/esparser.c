@@ -264,7 +264,9 @@ int esparser_queue_eos(struct amvdec_core *core, const u8 *data, u32 len)
 		return -ENOMEM;
 
 	memcpy(eos_vaddr, data, len);
+	mutex_lock(&core->parser_lock);
 	ret = esparser_write_data(core, eos_paddr, len);
+	mutex_unlock(&core->parser_lock);
 	dma_free_coherent(dev, len + SEARCH_PATTERN_LEN,
 			  eos_vaddr, eos_paddr);
 
@@ -287,7 +289,8 @@ static u32 esparser_get_offset(struct amvdec_session *sess)
 }
 
 static int
-esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
+esparser_queue_locked(struct amvdec_session *sess,
+		      struct vb2_v4l2_buffer *vbuf)
 {
 	int ret;
 	struct vb2_buffer *vb = &vbuf->vb2_buf;
@@ -373,6 +376,18 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 		codec_ops->input_queued(sess, payload_size);
 
 	return 0;
+}
+
+static int
+esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
+{
+	int ret;
+
+	mutex_lock(&sess->core->parser_lock);
+	ret = esparser_queue_locked(sess, vbuf);
+	mutex_unlock(&sess->core->parser_lock);
+
+	return ret;
 }
 
 void esparser_queue_all_src(struct work_struct *work)
