@@ -837,7 +837,7 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 	pixmp->width  = clamp(pixmp->width,  (u32)256, fmt_out->max_width);
 	pixmp->height = clamp(pixmp->height, (u32)144, fmt_out->max_height);
 	output_size = get_output_size(fmt_out->codec_ops,
-			      pixmp->width, pixmp->height);
+				      pixmp->width, pixmp->height);
 
 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		if (!pfmt[0].sizeimage)
