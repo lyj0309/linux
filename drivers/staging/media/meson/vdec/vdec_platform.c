@@ -12,6 +12,7 @@
 #include "codec_mpeg12.h"
 #include "codec_h264.h"
 #include "codec_h264_g12a.h"
+#include "codec_hevc.h"
 #include "codec_vp9.h"
 
 static const struct amvdec_format vdec_formats_gxbb[] = {
