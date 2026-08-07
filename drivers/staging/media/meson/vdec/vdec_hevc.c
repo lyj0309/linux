@@ -173,7 +173,7 @@ static int vdec_hevc_resume(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
-	bool preserve_context = codec_ops->context_switching && sess->priv;
+	bool preserve_context = codec_ops->context_switching && core->hw_sess;
 	int ret;
 
 	/* Keep per-session firmware state across frame-based context switches. */
