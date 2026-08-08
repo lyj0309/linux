@@ -1974,9 +1974,15 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		goto unlock;
 	}
 	if (ret > 0) {
-		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height,
-				  hevc->dpb_size,
-				  hevc->is_10bit ? 10 : 8);
+		u32 width = hevc->dst_width;
+		u32 height = hevc->dst_height;
+		u32 dpb_size = hevc->dpb_size;
+		u8 bitdepth = hevc->is_10bit ? 10 : 8;
+
+		/* The source-change helper updates session state and may resume us. */
+		mutex_unlock(&hevc->lock);
+		amvdec_src_change(sess, width, height, dpb_size, bitdepth);
+		mutex_lock(&hevc->lock);
 		if (sess->status == STATUS_NEEDS_RESUME)
 			yield = true;
 		goto unlock;
