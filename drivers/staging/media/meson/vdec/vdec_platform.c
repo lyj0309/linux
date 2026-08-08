@@ -191,7 +191,8 @@ static const struct amvdec_format vdec_formats_gxm[] = {
 	},
 };
 
-static const struct amvdec_format vdec_formats_g12a[] = {
+/* G12A and G12B use the same VDEC_HEVC firmware and format limits. */
+static const struct amvdec_format vdec_formats_g12ab[] = {
 	{
 		.pixfmt = V4L2_PIX_FMT_VP9,
 		.min_buffers = 16,
@@ -340,9 +341,15 @@ const struct vdec_platform vdec_platform_gxm = {
 };
 
 const struct vdec_platform vdec_platform_g12a = {
-	.formats = vdec_formats_g12a,
-	.num_formats = ARRAY_SIZE(vdec_formats_g12a),
+	.formats = vdec_formats_g12ab,
+	.num_formats = ARRAY_SIZE(vdec_formats_g12ab),
 	.revision = VDEC_REVISION_G12A,
+};
+
+const struct vdec_platform vdec_platform_g12b = {
+	.formats = vdec_formats_g12ab,
+	.num_formats = ARRAY_SIZE(vdec_formats_g12ab),
+	.revision = VDEC_REVISION_G12B,
 };
 
 const struct vdec_platform vdec_platform_sm1 = {
