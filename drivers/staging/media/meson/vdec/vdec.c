@@ -1370,8 +1370,7 @@ static int vdec_probe(struct platform_device *pdev)
 	of_id = of_match_node(vdec_dt_match, dev->of_node);
 	core->platform = of_id->data;
 
-	if (core->platform->revision == VDEC_REVISION_G12A ||
-	    core->platform->revision == VDEC_REVISION_SM1) {
+	if (core->platform->revision >= VDEC_REVISION_G12A) {
 		core->vdec_hevcf_clk = devm_clk_get(dev, "vdec_hevcf");
 		if (IS_ERR(core->vdec_hevcf_clk))
 			return -EPROBE_DEFER;

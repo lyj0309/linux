@@ -168,8 +168,7 @@ static int vdec_hevc_stop(struct amvdec_session *sess)
 	vdec_hevc_power_off(sess);
 
 	clk_disable_unprepare(core->vdec_hevc_clk);
-	if (core->platform->revision == VDEC_REVISION_G12A ||
-	    core->platform->revision == VDEC_REVISION_SM1)
+	if (core->platform->revision >= VDEC_REVISION_G12A)
 		clk_disable_unprepare(core->vdec_hevcf_clk);
 
 	return 0;
@@ -258,8 +257,7 @@ static int vdec_hevc_start(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	int ret;
 
-	if (core->platform->revision == VDEC_REVISION_G12A ||
-	    core->platform->revision == VDEC_REVISION_SM1) {
+	if (core->platform->revision >= VDEC_REVISION_G12A) {
 		clk_set_rate(core->vdec_hevcf_clk, 666666666);
 		ret = clk_prepare_enable(core->vdec_hevcf_clk);
 		if (ret)
