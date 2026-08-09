@@ -208,8 +208,13 @@ static int codec_hevc_alloc_mmu_headers(struct amvdec_session *sess,
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		u32 idx = buf->vb.vb2_buf.index;
 		dma_addr_t paddr;
-		void *vaddr = dma_alloc_coherent(dev, MMU_COMPRESS_HEADER_SIZE,
-						 &paddr, GFP_KERNEL);
+		void *vaddr;
+
+		if (comm->mmu_header_vaddr[idx])
+			continue;
+
+		vaddr = dma_alloc_coherent(dev, MMU_COMPRESS_HEADER_SIZE,
+					   &paddr, GFP_KERNEL);
 		if (!vaddr) {
 			codec_hevc_free_mmu_headers(sess, comm);
 			return -ENOMEM;
