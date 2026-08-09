@@ -1786,6 +1786,7 @@ static int codec_hevc_resume(struct amvdec_session *sess)
 	bool active;
 	int ret;
 
+	mutex_lock(&hevc->lock);
 	if (sess->status == STATUS_NEEDS_RESUME)
 		hevc->reset_buffers = true;
 
@@ -1794,6 +1795,7 @@ static int codec_hevc_resume(struct amvdec_session *sess)
 	spin_unlock_irqrestore(&core->irq_lock, flags);
 	if (!active) {
 		WRITE_ONCE(hevc->resume_pending, true);
+		mutex_unlock(&hevc->lock);
 		return 0;
 	}
 
@@ -1802,12 +1804,14 @@ static int codec_hevc_resume(struct amvdec_session *sess)
 	ret = codec_hevc_setup_buffers(sess, &hevc->common, hevc->is_10bit);
 	if (ret) {
 		amvdec_abort(sess);
+		mutex_unlock(&hevc->lock);
 		return ret;
 	}
 	hevc->reset_buffers = false;
 	ret = codec_hevc_setup_workspace(sess, hevc);
 	if (ret) {
 		amvdec_abort(sess);
+		mutex_unlock(&hevc->lock);
 		return ret;
 	}
 
@@ -1817,6 +1821,7 @@ static int codec_hevc_resume(struct amvdec_session *sess)
 		ret = codec_hevc_process_segment(sess);
 	if (ret)
 		amvdec_abort(sess);
+	mutex_unlock(&hevc->lock);
 
 	return ret;
 }
