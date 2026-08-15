@@ -32,6 +32,7 @@ struct dummy_buf {
 
 /* 16 MiB for parsed bitstream swap exchange */
 #define SIZE_VIFIFO SZ_16M
+#define VDEC_INACTIVE_TIMEOUT_MS 1000
 
 static u32 get_output_size(const struct amvdec_codec_ops *codec_ops,
 			   u32 width, u32 height)
@@ -196,10 +197,20 @@ static void vdec_stop_suspended_hardware(struct amvdec_session *sess)
 
 static void vdec_wait_inactive(struct amvdec_session *sess)
 {
+	u64 deadline = get_jiffies_64() +
+		msecs_to_jiffies(VDEC_INACTIVE_TIMEOUT_MS);
+
 	/* We consider 50ms with no IRQ to be inactive. */
 	while (time_is_after_jiffies64(sess->last_irq_jiffies +
-				       msecs_to_jiffies(50)))
+				       msecs_to_jiffies(50)) &&
+	       time_before64(get_jiffies_64(), deadline))
 		msleep(25);
+
+	if (time_is_after_jiffies64(sess->last_irq_jiffies +
+				   msecs_to_jiffies(50)))
+		dev_warn(sess->core->dev,
+			 "decoder did not become inactive within %u ms\n",
+			 VDEC_INACTIVE_TIMEOUT_MS);
 }
 
 static void vdec_poweroff(struct amvdec_session *sess)
