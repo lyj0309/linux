@@ -139,6 +139,7 @@
 #define HEVC_IMEM_DMA_CTRL 0xcd00
 #define HEVC_IMEM_DMA_ADR 0xcd04
 #define HEVC_IMEM_DMA_COUNT 0xcd08
+#define HEVC_LMEM_DMA_CTRL 0xcd40
 #define HEVC_WRRSP_LMEM 0xcd4c
 
 #define HEVCD_IPP_TOP_CNTL 0xd000
