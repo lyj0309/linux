@@ -179,10 +179,12 @@ static void vdec_hevc_suspend(struct amvdec_session *sess)
 	/* Disable firmware processor */
 	amvdec_write_dos(core, HEVC_MPSR, 0);
 	amvdec_write_dos(core, HEVC_CPSR, 0);
-	vdec_hevc_wait_dma_idle(core);
-	vdec_hevc_wait_search_idle(core);
+	if (!READ_ONCE(sess->hardware_stalled)) {
+		vdec_hevc_wait_dma_idle(core);
+		vdec_hevc_wait_search_idle(core);
+	}
 
-	if (sess->priv)
+	if (!READ_ONCE(sess->hardware_stalled) && sess->priv)
 		codec_ops->stop(sess);
 }
 

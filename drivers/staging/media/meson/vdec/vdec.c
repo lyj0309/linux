@@ -121,6 +121,8 @@ static int vdec_poweron(struct amvdec_session *sess)
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
+	WRITE_ONCE(sess->hardware_stalled, false);
+
 	ret = clk_prepare_enable(sess->core->dos_parser_clk);
 	if (ret)
 		return ret;
@@ -163,6 +165,8 @@ static int vdec_resume(struct amvdec_session *sess, bool reload_firmware)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	int ret;
 
+	WRITE_ONCE(sess->hardware_stalled, false);
+
 	ret = vdec_ops->resume(sess, reload_firmware);
 	if (ret)
 		return ret;
@@ -199,6 +203,7 @@ static void vdec_wait_inactive(struct amvdec_session *sess)
 {
 	u64 deadline = get_jiffies_64() +
 		msecs_to_jiffies(VDEC_INACTIVE_TIMEOUT_MS);
+	bool stalled;
 
 	/* We consider 50ms with no IRQ to be inactive. */
 	while (time_is_after_jiffies64(sess->last_irq_jiffies +
@@ -206,8 +211,11 @@ static void vdec_wait_inactive(struct amvdec_session *sess)
 	       time_before64(get_jiffies_64(), deadline))
 		msleep(25);
 
-	if (time_is_after_jiffies64(sess->last_irq_jiffies +
-				   msecs_to_jiffies(50)))
+	stalled = time_is_after_jiffies64(sess->last_irq_jiffies +
+					 msecs_to_jiffies(50));
+	WRITE_ONCE(sess->hardware_stalled, stalled);
+
+	if (stalled)
 		dev_warn(sess->core->dev,
 			 "decoder did not become inactive within %u ms\n",
 			 VDEC_INACTIVE_TIMEOUT_MS);

@@ -271,12 +271,12 @@ static void vdec_1_suspend(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
-	if (codec_ops->context_switching) {
+	if (!READ_ONCE(sess->hardware_stalled) && codec_ops->context_switching) {
 		vdec_1_quiesce(sess);
 		vdec_1_save_stbuf_context(sess);
 	}
 
-	if (sess->priv)
+	if (!READ_ONCE(sess->hardware_stalled) && sess->priv)
 		codec_ops->stop(sess);
 
 	amvdec_write_dos(core, MPSR, 0);
