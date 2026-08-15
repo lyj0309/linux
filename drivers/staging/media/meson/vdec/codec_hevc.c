@@ -827,6 +827,7 @@ static int codec_hevc_prepare_firmware(struct amvdec_session *sess,
 {
 	struct codec_hevc *hevc = sess->priv;
 	bool new_session = false;
+	bool new_swap = false;
 
 	if (len < FW_SWAP_OFFSET + SIZE_FW_SWAP) {
 		dev_err(sess->core->dev,
@@ -852,9 +853,11 @@ static int codec_hevc_prepare_firmware(struct amvdec_session *sess,
 			}
 			return -ENOMEM;
 		}
+		new_swap = true;
 	}
 
-	memcpy(hevc->fw_swap_vaddr, data + FW_SWAP_OFFSET, SIZE_FW_SWAP);
+	if (new_swap)
+		memcpy(hevc->fw_swap_vaddr, data + FW_SWAP_OFFSET, SIZE_FW_SWAP);
 	return 0;
 }
 
