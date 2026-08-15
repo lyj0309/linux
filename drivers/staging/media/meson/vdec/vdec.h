@@ -290,8 +290,9 @@ enum amvdec_m2m_job_state {
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
- * @num_dst_bufs: number of destination buffers
- * @changed_format: the format changed
+	 * @num_dst_bufs: number of destination buffers
+	 * @changed_format: the format changed
+	 * @source_change_pending: capture buffers need renegotiation
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
  * @canvas_regs: DOS registers containing the session canvas mappings
@@ -354,6 +355,7 @@ struct amvdec_session {
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;
+	bool source_change_pending;
 
 	u8 canvas_alloc[MAX_CANVAS];
 	u32 canvas_num;

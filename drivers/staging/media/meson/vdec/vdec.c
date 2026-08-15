@@ -437,6 +437,9 @@ static int vdec_m2m_job_ready(void *priv)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	bool src_ready;
 
+	if (READ_ONCE(sess->source_change_pending))
+		return 0;
+
 	if (!sess->streamon_out)
 		return 0;
 	if (codec_ops->has_pending_job &&
@@ -624,6 +627,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 		if (ret)
 			goto bufs_done;
 		sess->status = STATUS_RUNNING;
+		sess->source_change_pending = false;
 		goto unlock_ok;
 	}
 

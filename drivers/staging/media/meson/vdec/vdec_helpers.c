@@ -618,14 +618,17 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	if (sess->streamon_cap && capture_ready) {
 		if (!sess->fmt_out->codec_ops->resume(sess)) {
 			sess->status = STATUS_RUNNING;
+			sess->source_change_pending = false;
 		} else {
 			sess->status = STATUS_NEEDS_RESUME;
 			sess->changed_format = true;
+			sess->source_change_pending = true;
 		}
 	} else {
 		sess->status = STATUS_NEEDS_RESUME;
 		/* A compatible queue may have been allocated before this event. */
 		sess->changed_format = capture_ready;
+		sess->source_change_pending = true;
 	}
 
 	sess->width = width;
