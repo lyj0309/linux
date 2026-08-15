@@ -153,6 +153,19 @@ static void vdec_hevc_wait_dma_idle(struct amvdec_core *core)
 		dev_warn(dev, "LMEM write response did not become idle\n");
 }
 
+static void vdec_hevc_wait_search_idle(struct amvdec_core *core)
+{
+	struct device *dev = core->dev_dec;
+	u32 val;
+	int ret;
+
+	amvdec_write_dos(core, HEVC_SHIFT_STATUS, 0);
+	ret = readl_poll_timeout(core->dos_base + HEVC_STREAM_CONTROL, val,
+				 !(val & BIT(1)), 20000, 2000000);
+	if (ret)
+		dev_warn(dev, "HEVC stream search did not become idle\n");
+}
+
 static void vdec_hevc_suspend(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -167,6 +180,7 @@ static void vdec_hevc_suspend(struct amvdec_session *sess)
 	amvdec_write_dos(core, HEVC_MPSR, 0);
 	amvdec_write_dos(core, HEVC_CPSR, 0);
 	vdec_hevc_wait_dma_idle(core);
+	vdec_hevc_wait_search_idle(core);
 
 	if (sess->priv)
 		codec_ops->stop(sess);
