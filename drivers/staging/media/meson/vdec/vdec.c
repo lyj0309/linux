@@ -491,19 +491,18 @@ static void process_num_buffers(struct vb2_queue *q,
 	unsigned int buffers_total = q_num_bufs + *num_buffers;
 	u32 min_buf_capture = v4l2_ctrl_g_ctrl(sess->ctrl_min_buf_capture);
 
-	if (q_num_bufs + *num_buffers < min_buf_capture)
-		*num_buffers = min_buf_capture - q_num_bufs;
-	if (is_reqbufs && buffers_total < fmt_out->min_buffers)
-		*num_buffers = fmt_out->min_buffers - q_num_bufs;
-	if (buffers_total > fmt_out->max_buffers)
-		*num_buffers = fmt_out->max_buffers - q_num_bufs;
+	buffers_total = max(buffers_total, min_buf_capture);
+	if (is_reqbufs)
+		buffers_total = max(buffers_total, fmt_out->min_buffers);
+	buffers_total = min(buffers_total, fmt_out->max_buffers);
+	*num_buffers = buffers_total - q_num_bufs;
 
 	/* We need to program the complete CAPTURE buffer list
 	 * in registers during start_streaming, and the firmwares
 	 * are free to choose any of them to write frames to. As such,
 	 * we need all of them to be queued into the driver
 	 */
-	sess->num_dst_bufs = q_num_bufs + *num_buffers;
+	sess->num_dst_bufs = buffers_total;
 	q->min_queued_buffers = max(fmt_out->min_buffers, sess->num_dst_bufs);
 }
 
