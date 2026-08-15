@@ -138,7 +138,8 @@ struct amvdec_core {
  * @start: mandatory call when the vdec needs to initialize
  * @stop: mandatory call when the vdec needs to stop
  * @stop_suspended: optional call to power off an already suspended vdec
- * @resume: optional call to restore a switchable hardware context
+ * @resume: optional call to restore a switchable hardware context, reloading
+ * firmware when requested
  * @suspend: optional call to save a switchable hardware context
  * @hw: decoder hardware block used by these operations
  * @conf_esparser: mandatory call to let the vdec configure the ESPARSER
@@ -149,7 +150,7 @@ struct amvdec_ops {
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
 	int (*stop_suspended)(struct amvdec_session *sess);
-	int (*resume)(struct amvdec_session *sess);
+	int (*resume)(struct amvdec_session *sess, bool reload_firmware);
 	void (*suspend)(struct amvdec_session *sess);
 	enum amvdec_hw hw;
 	void (*conf_esparser)(struct amvdec_session *sess);

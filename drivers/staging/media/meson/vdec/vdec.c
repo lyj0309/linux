@@ -11,6 +11,7 @@
 #include <linux/platform_device.h>
 #include <linux/mfd/syscon.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/kthread.h>
 #include <media/v4l2-ioctl.h>
@@ -155,13 +156,13 @@ disable_dos_parser:
 	return ret;
 }
 
-static int vdec_resume(struct amvdec_session *sess)
+static int vdec_resume(struct amvdec_session *sess, bool reload_firmware)
 {
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	int ret;
 
-	ret = vdec_ops->resume(sess);
+	ret = vdec_ops->resume(sess, reload_firmware);
 	if (ret)
 		return ret;
 
@@ -268,6 +269,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_session *hw_sess;
 	struct amvdec_session **hw_slot;
+	bool reload_firmware = false;
 	int irq = vdec_session_irq(sess);
 	int ret = 0;
 
@@ -291,10 +293,13 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 	hw_slot = &core->hw_sess[sess->fmt_out->vdec_ops->hw];
 	hw_sess = *hw_slot;
+	if (hw_sess)
+		reload_firmware = strcmp(hw_sess->fmt_out->firmware_path,
+					 sess->fmt_out->firmware_path);
 
 	vdec_set_current_session(core, sess);
 	if (hw_sess)
-		ret = vdec_resume(sess);
+		ret = vdec_resume(sess, reload_firmware);
 	else
 		ret = vdec_poweron(sess);
 	if (ret) {

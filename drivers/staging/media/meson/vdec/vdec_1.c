@@ -35,7 +35,8 @@ static int vdec_1_swap_wait(struct amvdec_core *core)
 }
 
 static int
-vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
+vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname,
+		     bool load_hardware)
 {
 	const struct firmware *fw;
 	struct amvdec_core *core = sess->core;
@@ -43,8 +44,15 @@ vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	static void *mc_addr;
 	static dma_addr_t mc_addr_map;
+	bool prepare_complete;
+	bool prepare_extended;
 	int ret;
 	u32 i = 1000;
+
+	prepare_complete = codec_ops->prepare_firmware && !sess->priv;
+	prepare_extended = codec_ops->load_extended_firmware && !sess->priv;
+	if (!load_hardware && !prepare_complete && !prepare_extended)
+		return 0;
 
 	ret = request_firmware(&fw, fwname, dev);
 	if (ret < 0)
@@ -57,41 +65,47 @@ vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
 		goto release_firmware;
 	}
 
-	mc_addr = dma_alloc_coherent(core->dev, MC_SIZE,
-				     &mc_addr_map, GFP_KERNEL);
-	if (!mc_addr) {
-		ret = -ENOMEM;
-		goto release_firmware;
+	if (load_hardware) {
+		mc_addr = dma_alloc_coherent(core->dev, MC_SIZE,
+					     &mc_addr_map, GFP_KERNEL);
+		if (!mc_addr) {
+			ret = -ENOMEM;
+			goto release_firmware;
+		}
+
+		memcpy(mc_addr, fw->data, MC_SIZE);
+
+		amvdec_write_dos(core, MPSR, 0);
+		amvdec_write_dos(core, CPSR, 0);
+
+		amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
+
+		amvdec_write_dos(core, IMEM_DMA_ADR, mc_addr_map);
+		amvdec_write_dos(core, IMEM_DMA_COUNT, MC_SIZE / 4);
+		amvdec_write_dos(core, IMEM_DMA_CTRL,
+				 (0x8000 | (7 << 16)));
+
+		while (--i &&
+		       amvdec_read_dos(core, IMEM_DMA_CTRL) & 0x8000)
+			;
+
+		if (!i) {
+			dev_err(dev, "Firmware load fail (DMA hang?)\n");
+			ret = -EINVAL;
+			goto free_mc;
+		}
 	}
 
-	memcpy(mc_addr, fw->data, MC_SIZE);
-
-	amvdec_write_dos(core, MPSR, 0);
-	amvdec_write_dos(core, CPSR, 0);
-
-	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
-
-	amvdec_write_dos(core, IMEM_DMA_ADR, mc_addr_map);
-	amvdec_write_dos(core, IMEM_DMA_COUNT, MC_SIZE / 4);
-	amvdec_write_dos(core, IMEM_DMA_CTRL, (0x8000 | (7 << 16)));
-
-	while (--i && amvdec_read_dos(core, IMEM_DMA_CTRL) & 0x8000);
-
-	if (i == 0) {
-		dev_err(dev, "Firmware load fail (DMA hang?)\n");
-		ret = -EINVAL;
-		goto free_mc;
-	}
-
-	if (codec_ops->prepare_firmware)
+	if (prepare_complete)
 		ret = codec_ops->prepare_firmware(sess, fw->data, fw->size);
-	else if (codec_ops->load_extended_firmware)
+	else if (prepare_extended)
 		ret = codec_ops->load_extended_firmware(sess,
 							fw->data + MC_SIZE,
 							fw->size - MC_SIZE);
 
 free_mc:
-	dma_free_coherent(core->dev, MC_SIZE, mc_addr, mc_addr_map);
+	if (load_hardware)
+		dma_free_coherent(core->dev, MC_SIZE, mc_addr, mc_addr_map);
 release_firmware:
 	release_firmware(fw);
 	return ret;
@@ -313,7 +327,7 @@ static int vdec_1_stop(struct amvdec_session *sess)
 	return vdec_1_stop_suspended(sess);
 }
 
-static int vdec_1_resume(struct amvdec_session *sess)
+static int vdec_1_resume(struct amvdec_session *sess, bool reload_firmware)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
@@ -342,7 +356,8 @@ static int vdec_1_resume(struct amvdec_session *sess)
 	if (ret)
 		goto stop;
 
-	ret = vdec_1_load_firmware(sess, sess->fmt_out->firmware_path);
+	ret = vdec_1_load_firmware(sess, sess->fmt_out->firmware_path,
+				   reload_firmware);
 	if (ret)
 		goto stop;
 
@@ -406,7 +421,7 @@ static int vdec_1_start(struct amvdec_session *sess)
 	else
 		regmap_write(core->regmap_ao, AO_RTI_GEN_PWR_ISO0, 0);
 
-	ret = vdec_1_resume(sess);
+	ret = vdec_1_resume(sess, true);
 	if (!ret)
 		return 0;
 
