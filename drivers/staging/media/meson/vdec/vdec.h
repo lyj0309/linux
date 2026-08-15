@@ -315,6 +315,7 @@ enum amvdec_m2m_job_state {
  * @timestamps: chronological list of src timestamps
  * @ts_spinlock: spinlock for the timestamps list
  * @last_irq_jiffies: tracks last time the vdec triggered an IRQ
+ * @irq_seen: decoder has produced at least one interrupt
  * @hardware_stalled: decoder stopped responding before teardown
  * @last_offset: tracks last offset of vififo
  * @wrap_count: number of times the vififo wrapped around
@@ -384,6 +385,7 @@ struct amvdec_session {
 	spinlock_t ts_spinlock; /* timestamp list lock */
 
 	u64 last_irq_jiffies;
+	bool irq_seen;
 	bool hardware_stalled;
 	u32 last_offset;
 	u32 wrap_count;
