@@ -254,6 +254,12 @@ enum amvdec_status {
 	STATUS_NEEDS_RESUME,
 };
 
+enum amvdec_m2m_job_state {
+	AMVDEC_M2M_JOB_IDLE,
+	AMVDEC_M2M_JOB_RUNNING,
+	AMVDEC_M2M_JOB_COMPLETING,
+};
+
 /**
  * struct amvdec_session - decoding session parameters
  *
@@ -275,7 +281,7 @@ enum amvdec_status {
  * @pixelaspect: Pixel Aspect Ratio reported by the decoder
  * @esparser_queued_bufs: number of buffers currently queued into ESPARSER
  * @esparser_queue_work: work struct for the ESPARSER to process src buffers
- * @m2m_job_running: whether this context currently owns the m2m scheduler
+ * @m2m_job_running: current state of this context in the m2m scheduler
  * @streamon_cap: stream on flag for capture queue
  * @streamon_out: stream on flag for output queue
  * @sequence_cap: capture sequence counter
@@ -344,7 +350,7 @@ struct amvdec_session {
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
 	unsigned int should_stop;
-	bool draining;
+	unsigned int draining;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;

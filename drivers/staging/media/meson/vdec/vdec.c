@@ -259,7 +259,7 @@ static void vdec_m2m_device_run(void *priv)
 {
 	struct amvdec_session *sess = priv;
 
-	atomic_set(&sess->m2m_job_running, 1);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_RUNNING);
 	schedule_work(&sess->esparser_queue_work);
 }
 
@@ -280,7 +280,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 	disable_irq(irq);
 	mutex_lock(&core->hw_lock);
-	if (!atomic_read(&sess->m2m_job_running)) {
+	if (atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_RUNNING) {
 		ret = -ECANCELED;
 		goto unlock;
 	}
@@ -357,14 +357,40 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 		enable_irq(irq);
 }
 
+static bool vdec_m2m_finish_drain(struct amvdec_session *sess)
+{
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+
+	if (!codec_ops->async_drain || !READ_ONCE(sess->draining) ||
+	    atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_IDLE ||
+	    v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	    (codec_ops->has_pending_job && codec_ops->has_pending_job(sess)))
+		return false;
+
+	if (cmpxchg(&sess->draining, 1U, 0U) != 1U)
+		return false;
+
+	sess->should_stop = 1;
+	if (codec_ops->drain)
+		codec_ops->drain(sess);
+	v4l2_m2m_mark_stopped(sess->m2m_ctx);
+
+	return true;
+}
+
 static void vdec_m2m_complete_job(struct amvdec_session *sess,
 				  bool synchronize)
 {
-	if (atomic_cmpxchg(&sess->m2m_job_running, 1, 0) != 1)
+	if (atomic_cmpxchg(&sess->m2m_job_running,
+			   AMVDEC_M2M_JOB_RUNNING,
+			   AMVDEC_M2M_JOB_COMPLETING) !=
+	    AMVDEC_M2M_JOB_RUNNING)
 		return;
 
 	if (sess->fmt_out->codec_ops->context_switching)
 		vdec_m2m_release_hardware(sess, synchronize);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_IDLE);
+	vdec_m2m_finish_drain(sess);
 
 	v4l2_m2m_job_finish(sess->core->m2m_dev, sess->m2m_ctx);
 }
@@ -381,7 +407,7 @@ void amvdec_m2m_job_yield(struct amvdec_session *sess)
 
 void amvdec_m2m_retry_job(struct amvdec_session *sess)
 {
-	if (atomic_read(&sess->m2m_job_running))
+	if (atomic_read(&sess->m2m_job_running) == AMVDEC_M2M_JOB_RUNNING)
 		schedule_work(&sess->esparser_queue_work);
 }
 
@@ -548,7 +574,7 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 		return;
 	if ((vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
 	     (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && !held)) &&
-	    atomic_read(&sess->m2m_job_running))
+	    atomic_read(&sess->m2m_job_running) == AMVDEC_M2M_JOB_RUNNING)
 		schedule_work(&sess->esparser_queue_work);
 
 	if (sess->streamon_cap &&
@@ -1105,9 +1131,10 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
 	     atomic_read(&sess->esparser_queued_bufs) ||
 	     (codec_ops->async_drain &&
-	      atomic_read(&sess->m2m_job_running)))) {
-		sess->draining = true;
-		v4l2_m2m_try_schedule(sess->m2m_ctx);
+	      atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_IDLE))) {
+		WRITE_ONCE(sess->draining, 1);
+		if (!vdec_m2m_finish_drain(sess))
+			v4l2_m2m_try_schedule(sess->m2m_ctx);
 		return 0;
 	}
 
@@ -1278,7 +1305,7 @@ static int vdec_open(struct file *file)
 	INIT_LIST_HEAD(&sess->timestamps);
 	INIT_LIST_HEAD(&sess->bufs_recycle);
 	INIT_WORK(&sess->esparser_queue_work, esparser_queue_all_src);
-	atomic_set(&sess->m2m_job_running, 0);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_IDLE);
 	mutex_init(&sess->lock);
 	mutex_init(&sess->bufs_recycle_lock);
 	spin_lock_init(&sess->ts_spinlock);
