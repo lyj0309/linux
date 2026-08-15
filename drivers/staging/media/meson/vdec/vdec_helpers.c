@@ -401,16 +401,28 @@ static void dst_buf_done(struct amvdec_session *sess,
 	switch (sess->pixfmt_cap) {
 	case V4L2_PIX_FMT_NV12:
 		vb2_set_plane_payload(&vbuf->vb2_buf, 0,
-				      output_size + output_size / 2);
+				      min_t(unsigned long,
+					    output_size + output_size / 2,
+					    vb2_plane_size(&vbuf->vb2_buf, 0)));
 		break;
 	case V4L2_PIX_FMT_NV12M:
-		vb2_set_plane_payload(&vbuf->vb2_buf, 0, output_size);
-		vb2_set_plane_payload(&vbuf->vb2_buf, 1, output_size / 2);
+		vb2_set_plane_payload(&vbuf->vb2_buf, 0,
+				      min_t(unsigned long, output_size,
+					    vb2_plane_size(&vbuf->vb2_buf, 0)));
+		vb2_set_plane_payload(&vbuf->vb2_buf, 1,
+				      min_t(unsigned long, output_size / 2,
+					    vb2_plane_size(&vbuf->vb2_buf, 1)));
 		break;
 	case V4L2_PIX_FMT_YUV420M:
-		vb2_set_plane_payload(&vbuf->vb2_buf, 0, output_size);
-		vb2_set_plane_payload(&vbuf->vb2_buf, 1, output_size / 4);
-		vb2_set_plane_payload(&vbuf->vb2_buf, 2, output_size / 4);
+		vb2_set_plane_payload(&vbuf->vb2_buf, 0,
+				      min_t(unsigned long, output_size,
+					    vb2_plane_size(&vbuf->vb2_buf, 0)));
+		vb2_set_plane_payload(&vbuf->vb2_buf, 1,
+				      min_t(unsigned long, output_size / 4,
+					    vb2_plane_size(&vbuf->vb2_buf, 1)));
+		vb2_set_plane_payload(&vbuf->vb2_buf, 2,
+				      min_t(unsigned long, output_size / 4,
+					    vb2_plane_size(&vbuf->vb2_buf, 2)));
 		break;
 	}
 
