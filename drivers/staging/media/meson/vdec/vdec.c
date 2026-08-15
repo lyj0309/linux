@@ -1103,6 +1103,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 	if (codec_ops->context_switching &&
 	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	     atomic_read(&sess->esparser_queued_bufs) ||
 	     (codec_ops->async_drain &&
 	      atomic_read(&sess->m2m_job_running)))) {
 		sess->draining = true;
