@@ -460,8 +460,12 @@ int esparser_power_up(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+	int ret;
 
-	reset_control_reset(core->esparser_reset);
+	ret = reset_control_reset(core->esparser_reset);
+	if (ret)
+		return ret;
+
 	amvdec_write_parser(core, PARSER_CONFIG,
 			    (10 << PS_CFG_PFIFO_EMPTY_CNT_BIT) |
 			    (1  << PS_CFG_MAX_ES_WR_CYCLE_BIT) |

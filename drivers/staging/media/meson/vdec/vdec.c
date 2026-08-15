@@ -139,7 +139,14 @@ static int vdec_poweron(struct amvdec_session *sess)
 		goto disable_dos;
 	}
 
-	esparser_power_up(sess);
+	ret = esparser_power_up(sess);
+	if (ret) {
+		vdec_ops->stop(sess);
+		if (codec_ops->release && sess->priv)
+			codec_ops->release(sess);
+		goto disable_dos;
+	}
+
 	if (codec_ops->run) {
 		ret = codec_ops->run(sess);
 		if (ret) {
