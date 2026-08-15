@@ -275,6 +275,7 @@ enum amvdec_m2m_job_state {
  * @width: current picture width
  * @height: current picture height
  * @colorspace: current colorspace
+ * @bitdepth: current luma and chroma bit depth
  * @ycbcr_enc: current ycbcr_enc
  * @quantization: current quantization
  * @xfer_func: current transfer function
@@ -290,9 +291,9 @@ enum amvdec_m2m_job_state {
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
-	 * @num_dst_bufs: number of destination buffers
-	 * @changed_format: the format changed
-	 * @source_change_pending: capture buffers need renegotiation
+ * @num_dst_bufs: number of destination buffers
+ * @changed_format: the format changed
+ * @source_change_pending: capture buffers need renegotiation
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
  * @canvas_regs: DOS registers containing the session canvas mappings
