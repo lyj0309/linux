@@ -1781,13 +1781,28 @@ static void codec_hevc_fetch_rpm(struct amvdec_session *sess)
 	hevc->max_dec_pic_buffering = raw[RPM_MULTI_DPB_OFFSET];
 }
 
-static int codec_hevc_resume(struct amvdec_session *sess)
+static void codec_hevc_start_cpu(struct amvdec_core *core)
+{
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_write_dos(core, DOS_SW_RESET3, BIT(12) | BIT(11));
+	amvdec_write_dos(core, DOS_SW_RESET3, 0);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_read_dos(core, DOS_SW_RESET3);
+	amvdec_write_dos_bits(core, HEVC_WRRSP_LMEM, 7 << 25);
+	amvdec_write_dos(core, HEVC_MPSR, 1);
+}
+
+static int codec_hevc_resume_context(struct amvdec_session *sess,
+				     bool restart_input)
 {
 	struct codec_hevc *hevc = sess->priv;
 	struct amvdec_core *core = sess->core;
 	unsigned long flags;
 	bool active;
-	int ret;
+	int ret = 0;
 
 	mutex_lock(&hevc->lock);
 	if (sess->status == STATUS_NEEDS_RESUME)
@@ -1819,28 +1834,27 @@ static int codec_hevc_resume(struct amvdec_session *sess)
 	}
 
 	codec_hevc_setup_decode_head(sess, hevc->is_10bit);
-	ret = codec_hevc_process_segment_header(sess);
-	if (!ret)
-		ret = codec_hevc_process_segment(sess);
-	if (ret)
-		amvdec_abort(sess);
+	if (restart_input) {
+		amvdec_write_dos(core, HEVC_WAIT_FLAG, 0);
+		amvdec_write_dos(core, HEVC_SHIFT_BYTE_COUNT, 0);
+		amvdec_write_dos(core, HEVC_DECODE_SIZE, hevc->input_size);
+		amvdec_write_dos(core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
+		codec_hevc_start_cpu(core);
+	} else {
+		ret = codec_hevc_process_segment_header(sess);
+		if (!ret)
+			ret = codec_hevc_process_segment(sess);
+		if (ret)
+			amvdec_abort(sess);
+	}
 	mutex_unlock(&hevc->lock);
 
 	return ret;
 }
 
-static void codec_hevc_start_cpu(struct amvdec_core *core)
+static int codec_hevc_resume(struct amvdec_session *sess)
 {
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_write_dos(core, DOS_SW_RESET3, BIT(12) | BIT(11));
-	amvdec_write_dos(core, DOS_SW_RESET3, 0);
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_read_dos(core, DOS_SW_RESET3);
-	amvdec_write_dos_bits(core, HEVC_WRRSP_LMEM, 7 << 25);
-	amvdec_write_dos(core, HEVC_MPSR, 1);
+	return codec_hevc_resume_context(sess, false);
 }
 
 static int codec_hevc_run(struct amvdec_session *sess)
@@ -1851,7 +1865,7 @@ static int codec_hevc_run(struct amvdec_session *sess)
 		return 0;
 	if (READ_ONCE(hevc->resume_pending)) {
 		WRITE_ONCE(hevc->resume_pending, false);
-		return codec_hevc_resume(sess);
+		return codec_hevc_resume_context(sess, true);
 	}
 
 	mutex_lock(&hevc->lock);
@@ -1908,7 +1922,8 @@ static bool codec_hevc_has_pending_job(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc = sess->priv;
 
-	return hevc && READ_ONCE(hevc->resume_pending);
+	return hevc && (READ_ONCE(hevc->resume_pending) ||
+			READ_ONCE(hevc->input_pending));
 }
 
 static bool codec_hevc_job_ready(struct amvdec_session *sess)
