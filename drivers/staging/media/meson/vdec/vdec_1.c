@@ -296,16 +296,21 @@ static void vdec_1_power_off(struct amvdec_session *sess)
 
 }
 
-static int vdec_1_stop(struct amvdec_session *sess)
+static int vdec_1_stop_suspended(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 
-	vdec_1_suspend(sess);
 	vdec_1_power_off(sess);
 
 	clk_disable_unprepare(core->vdec_1_clk);
 
 	return 0;
+}
+
+static int vdec_1_stop(struct amvdec_session *sess)
+{
+	vdec_1_suspend(sess);
+	return vdec_1_stop_suspended(sess);
 }
 
 static int vdec_1_resume(struct amvdec_session *sess)
@@ -413,6 +418,7 @@ static int vdec_1_start(struct amvdec_session *sess)
 struct amvdec_ops vdec_1_ops = {
 	.start = vdec_1_start,
 	.stop = vdec_1_stop,
+	.stop_suspended = vdec_1_stop_suspended,
 	.resume = vdec_1_resume,
 	.suspend = vdec_1_suspend,
 	.conf_esparser = vdec_1_conf_esparser,

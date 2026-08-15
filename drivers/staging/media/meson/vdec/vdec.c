@@ -181,6 +181,18 @@ static void vdec_stop_hardware(struct amvdec_session *sess)
 	clk_disable_unprepare(sess->core->dos_parser_clk);
 }
 
+static void vdec_stop_suspended_hardware(struct amvdec_session *sess)
+{
+	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+
+	if (vdec_ops->stop_suspended)
+		vdec_ops->stop_suspended(sess);
+	else
+		vdec_ops->stop(sess);
+	clk_disable_unprepare(sess->core->dos_clk);
+	clk_disable_unprepare(sess->core->dos_parser_clk);
+}
+
 static void vdec_wait_inactive(struct amvdec_session *sess)
 {
 	/* We consider 50ms with no IRQ to be inactive. */
@@ -199,6 +211,18 @@ static void vdec_poweroff(struct amvdec_session *sess)
 		codec_ops->drain(sess);
 
 	vdec_stop_hardware(sess);
+	if (codec_ops->release && sess->priv)
+		codec_ops->release(sess);
+}
+
+static void vdec_poweroff_suspended(struct amvdec_session *sess)
+{
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+
+	sess->should_stop = 1;
+	if (codec_ops->drain)
+		codec_ops->drain(sess);
+	vdec_stop_suspended_hardware(sess);
 	if (codec_ops->release && sess->priv)
 		codec_ops->release(sess);
 }
@@ -243,6 +267,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
 	struct amvdec_session *hw_sess;
+	struct amvdec_session **hw_slot;
 	int irq = vdec_session_irq(sess);
 	int ret = 0;
 
@@ -264,12 +289,8 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		goto unlock;
 	}
 
-	hw_sess = core->hw_sess;
-	if (hw_sess && hw_sess->fmt_out->vdec_ops != sess->fmt_out->vdec_ops) {
-		vdec_stop_hardware(hw_sess);
-		core->hw_sess = NULL;
-		hw_sess = NULL;
-	}
+	hw_slot = &core->hw_sess[sess->fmt_out->vdec_ops->hw];
+	hw_sess = *hw_slot;
 
 	vdec_set_current_session(core, sess);
 	if (hw_sess)
@@ -280,11 +301,11 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		vdec_set_current_session(core, NULL);
 		if (hw_sess) {
 			vdec_stop_hardware(sess);
-			core->hw_sess = NULL;
+			*hw_slot = NULL;
 		}
 		goto unlock;
 	}
-	core->hw_sess = sess;
+	*hw_slot = sess;
 
 unlock:
 	mutex_unlock(&core->hw_lock);
@@ -296,26 +317,34 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 				      bool synchronize)
 {
 	struct amvdec_core *core = sess->core;
+	struct amvdec_session **hw_slot;
+	bool is_current;
 	int irq = vdec_session_irq(sess);
+
+	hw_slot = &core->hw_sess[sess->fmt_out->vdec_ops->hw];
 
 	if (synchronize)
 		disable_irq(irq);
 
 	mutex_lock(&core->hw_lock);
-	if (core->cur_sess == sess ||
-	    (synchronize && core->hw_sess == sess)) {
+	is_current = core->cur_sess == sess;
+	if (is_current || (synchronize && *hw_slot == sess)) {
 		if (synchronize) {
-			vdec_stop_hardware(sess);
-			core->hw_sess = NULL;
+			if (is_current)
+				vdec_stop_hardware(sess);
+			else
+				vdec_stop_suspended_hardware(sess);
+			*hw_slot = NULL;
 		} else if (sess->should_stop) {
 			vdec_stop_hardware(sess);
-			core->hw_sess = NULL;
+			*hw_slot = NULL;
 		} else {
 			vdec_suspend(sess);
 			if (!sess->fmt_out->vdec_ops->resume)
-				core->hw_sess = NULL;
+				*hw_slot = NULL;
 		}
-		vdec_set_current_session(core, NULL);
+		if (is_current)
+			vdec_set_current_session(core, NULL);
 	}
 	mutex_unlock(&core->hw_lock);
 
@@ -609,6 +638,9 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	sess->sequence_out = 0;
 	sess->status = STATUS_INIT;
 	if (!codec_ops->context_switching) {
+		struct amvdec_session **hw_slot;
+
+		hw_slot = &core->hw_sess[sess->fmt_out->vdec_ops->hw];
 		disable_irq(irq);
 		vdec_set_current_session(core, sess);
 
@@ -619,7 +651,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 			sess->status = STATUS_STOPPED;
 			goto vififo_free;
 		}
-		core->hw_sess = sess;
+		*hw_slot = sess;
 		enable_irq(irq);
 	}
 
@@ -688,9 +720,12 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *buf;
+	struct amvdec_session **hw_slot;
 	bool decoder_active;
 	bool disable_decoder_irq;
 	int irq = vdec_session_irq(sess);
+
+	hw_slot = &core->hw_sess[sess->fmt_out->vdec_ops->hw];
 
 	decoder_active = sess->status == STATUS_RUNNING ||
 			 sess->status == STATUS_INIT ||
@@ -705,10 +740,14 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 		if (vdec_codec_needs_recycle(sess))
 			kthread_stop(sess->recycle_thread);
 
-		if (core->hw_sess == sess) {
-			vdec_set_current_session(core, NULL);
-			vdec_poweroff(sess);
-			core->hw_sess = NULL;
+		if (*hw_slot == sess) {
+			if (core->cur_sess == sess) {
+				vdec_set_current_session(core, NULL);
+				vdec_poweroff(sess);
+			} else {
+				vdec_poweroff_suspended(sess);
+			}
+			*hw_slot = NULL;
 		} else if (codec_ops->release && sess->priv) {
 			codec_ops->release(sess);
 		}

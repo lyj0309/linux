@@ -160,11 +160,10 @@ static void vdec_hevc_power_off(struct amvdec_session *sess)
 				   GEN_PWR_VDEC_HEVC, GEN_PWR_VDEC_HEVC);
 }
 
-static int vdec_hevc_stop(struct amvdec_session *sess)
+static int vdec_hevc_stop_suspended(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 
-	vdec_hevc_suspend(sess);
 	vdec_hevc_power_off(sess);
 
 	clk_disable_unprepare(core->vdec_hevc_clk);
@@ -172,6 +171,12 @@ static int vdec_hevc_stop(struct amvdec_session *sess)
 		clk_disable_unprepare(core->vdec_hevcf_clk);
 
 	return 0;
+}
+
+static int vdec_hevc_stop(struct amvdec_session *sess)
+{
+	vdec_hevc_suspend(sess);
+	return vdec_hevc_stop_suspended(sess);
 }
 
 static int vdec_hevc_resume(struct amvdec_session *sess)
@@ -275,8 +280,10 @@ static int vdec_hevc_start(struct amvdec_session *sess)
 struct amvdec_ops vdec_hevc_ops = {
 	.start = vdec_hevc_start,
 	.stop = vdec_hevc_stop,
+	.stop_suspended = vdec_hevc_stop_suspended,
 	.resume = vdec_hevc_resume,
 	.suspend = vdec_hevc_suspend,
+	.hw = AMVDEC_HW_VDEC_HEVC,
 	.conf_esparser = vdec_hevc_conf_esparser,
 	.vififo_level = vdec_hevc_vififo_level,
 };
