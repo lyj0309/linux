@@ -1185,8 +1185,11 @@ static int codec_h264_multi_finish_picture(struct amvdec_session *sess)
 		return -EINVAL;
 
 	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
-	if (!frame)
+	if (!frame) {
+		v4l2_m2m_buf_done(h264->pic_state.vbuf, VB2_BUF_STATE_ERROR);
+		h264_multi_dpb_picture_reset(&h264->pic_state);
 		return -ENOMEM;
+	}
 
 	buffer_index = h264->pic_state.buffer_index;
 	frame->vbuf = h264->pic_state.vbuf;
@@ -1195,8 +1198,11 @@ static int codec_h264_multi_finish_picture(struct amvdec_session *sess)
 			 h264->pic_state.poc.bottom);
 	frame->type = codec_h264_multi_picture_type(&h264->pic_state.picture);
 	ret = amvdec_take_ts(sess, &frame->timestamp);
-	if (ret)
+	if (ret) {
+		v4l2_m2m_buf_done(frame->vbuf, VB2_BUF_STATE_ERROR);
+		h264_multi_dpb_picture_reset(&h264->pic_state);
 		goto free_frame;
+	}
 
 	ret = h264_multi_dpb_picture_finish(&h264->dpb, &h264->config,
 					    &h264->pic_state,
