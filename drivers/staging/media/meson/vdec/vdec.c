@@ -654,6 +654,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (sess->status == STATUS_NEEDS_RESUME &&
 	    q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    sess->changed_format) {
+		v4l2_m2m_clear_state(sess->m2m_ctx);
 		ret = codec_ops->resume(sess);
 		if (ret)
 			goto bufs_done;

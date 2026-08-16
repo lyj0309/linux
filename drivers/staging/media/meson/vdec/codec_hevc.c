@@ -826,6 +826,30 @@ static void codec_hevc_flush_output(struct amvdec_session *sess)
 		list_del(&tmp->list);
 		kfree(tmp);
 	}
+
+	hevc->frames_num = 0;
+	hevc->cur_frame = NULL;
+	hevc->col_frame = NULL;
+}
+
+static void codec_hevc_signal_source_change(struct amvdec_session *sess)
+{
+	struct vb2_v4l2_buffer *vbuf;
+	unsigned int i;
+
+	vbuf = v4l2_m2m_dst_buf_remove(sess->m2m_ctx);
+	if (!vbuf) {
+		dev_warn(sess->core->dev,
+			 "No capture buffer available for source change\n");
+		return;
+	}
+
+	for (i = 0; i < vbuf->vb2_buf.num_planes; i++)
+		vb2_set_plane_payload(&vbuf->vb2_buf, i, 0);
+	vbuf->sequence = sess->sequence_cap++;
+	vbuf->field = V4L2_FIELD_NONE;
+	v4l2_m2m_last_buffer_done(sess->m2m_ctx, vbuf);
+	sess->sequence_cap = 0;
 }
 
 static int codec_hevc_prepare_firmware(struct amvdec_session *sess,
@@ -2009,13 +2033,20 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		u32 height = hevc->dst_height;
 		u32 dpb_size = hevc->dpb_size;
 		u8 bitdepth = hevc->is_10bit ? 10 : 8;
+		bool capture_streaming = sess->streamon_cap;
+
+		if (capture_streaming)
+			codec_hevc_flush_output(sess);
 
 		/* The source-change helper updates session state and may resume us. */
 		mutex_unlock(&hevc->lock);
 		amvdec_src_change(sess, width, height, dpb_size, bitdepth);
 		mutex_lock(&hevc->lock);
-		if (sess->status == STATUS_NEEDS_RESUME)
+		if (sess->status == STATUS_NEEDS_RESUME) {
+			if (capture_streaming)
+				codec_hevc_signal_source_change(sess);
 			yield = true;
+		}
 		goto unlock;
 	}
 
