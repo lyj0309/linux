@@ -36,6 +36,9 @@
 #define DEBUG_REG1		HEVC_ASSIST_SCRATCH_G
 #define HEVC_DECODE_MODE2	HEVC_ASSIST_SCRATCH_H
 #define NAL_SEARCH_CTL		HEVC_ASSIST_SCRATCH_I
+	#define NAL_SEARCH_AUTO		0x2
+	#define NAL_SEARCH_MULTI		0x4
+	#define NAL_SEARCH_LEGACY		0xc
 #define HEVC_DECODE_MODE	HEVC_ASSIST_SCRATCH_J
 	#define DECODE_MODE_SINGLE			0
 	#define DECODE_MODE_MULTI_FRAMEBASE	1
@@ -311,6 +314,7 @@ struct codec_hevc {
 	bool input_pending;
 	bool waiting_for_input;
 	bool resume_pending;
+	bool nal_search_done;
 	bool reset_buffers;
 
 	/* Whether we detected the bitstream as 10-bit */
@@ -752,7 +756,9 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	/* disable PSCALE for hardware sharing */
 	amvdec_write_dos(core, HEVC_PSCALE_CTRL, 0);
 	/* Let the uCode do all the parsing. */
-	amvdec_write_dos(core, NAL_SEARCH_CTL, multi ? 0x4 : 0xc);
+	amvdec_write_dos(core, NAL_SEARCH_CTL,
+			 multi && hevc->nal_search_done ? NAL_SEARCH_AUTO :
+			 multi ? NAL_SEARCH_MULTI : NAL_SEARCH_LEGACY);
 
 	amvdec_write_dos(core, DECODE_STOP_POS, 0);
 	if (multi) {
@@ -1996,6 +2002,8 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 		yield = true;
 		goto unlock;
 	}
+	if (sess->fmt_out->codec_ops->irq == AMVDEC_IRQ_MBOX0)
+		hevc->nal_search_done = true;
 	if (ret > 0) {
 		u32 width = hevc->dst_width;
 		u32 height = hevc->dst_height;
