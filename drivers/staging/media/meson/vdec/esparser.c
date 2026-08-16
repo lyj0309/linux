@@ -435,7 +435,7 @@ void esparser_queue_all_src(struct work_struct *work)
 		mutex_lock(&core->hw_lock);
 		if (atomic_read(&sess->m2m_job_running) !=
 		    AMVDEC_M2M_JOB_RUNNING ||
-		    core->cur_sess != sess) {
+		    !amvdec_session_is_current(sess)) {
 			mutex_unlock(&core->hw_lock);
 			mutex_unlock(&sess->lock);
 			return;

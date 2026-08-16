@@ -402,6 +402,7 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+bool amvdec_session_is_current(struct amvdec_session *sess);
 int amvdec_m2m_job_start(struct amvdec_session *sess);
 void amvdec_m2m_job_finish(struct amvdec_session *sess);
 void amvdec_m2m_job_yield(struct amvdec_session *sess);

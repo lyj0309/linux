@@ -69,16 +69,30 @@ static int vdec_session_irq(struct amvdec_session *sess)
 }
 
 static struct amvdec_session *
-vdec_current_session(struct amvdec_core *core, int irq)
+vdec_get_current_session(struct amvdec_core *core)
 {
 	struct amvdec_session *sess;
 	unsigned long flags;
 
 	spin_lock_irqsave(&core->irq_lock, flags);
 	sess = core->cur_sess;
-	if (sess && vdec_session_irq(sess) != irq)
-		sess = NULL;
 	spin_unlock_irqrestore(&core->irq_lock, flags);
+
+	return sess;
+}
+
+bool amvdec_session_is_current(struct amvdec_session *sess)
+{
+	return vdec_get_current_session(sess->core) == sess;
+}
+
+static struct amvdec_session *
+vdec_current_session(struct amvdec_core *core, int irq)
+{
+	struct amvdec_session *sess = vdec_get_current_session(core);
+
+	if (sess && vdec_session_irq(sess) != irq)
+		return NULL;
 
 	return sess;
 }
@@ -313,9 +327,9 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		ret = -ECANCELED;
 		goto unlock;
 	}
-	if (core->cur_sess == sess)
+	if (amvdec_session_is_current(sess))
 		goto unlock;
-	if (core->cur_sess) {
+	if (vdec_get_current_session(core)) {
 		ret = -EBUSY;
 		goto unlock;
 	}
@@ -361,7 +375,7 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 		disable_irq(irq);
 
 	mutex_lock(&core->hw_lock);
-	is_current = core->cur_sess == sess;
+	is_current = amvdec_session_is_current(sess);
 	if (is_current || (synchronize && *hw_slot == sess)) {
 		if (synchronize) {
 			if (is_current)
@@ -804,7 +818,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 			kthread_stop(sess->recycle_thread);
 
 		if (*hw_slot == sess) {
-			if (core->cur_sess == sess) {
+			if (amvdec_session_is_current(sess)) {
 				vdec_set_current_session(core, NULL);
 				vdec_poweroff(sess);
 			} else {
