@@ -188,7 +188,7 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 	if (sess->priv)
 		return 0;
 
-	h264 = kzalloc_obj(*h264);
+	h264 = kzalloc(sizeof(*h264), GFP_KERNEL);
 	if (!h264)
 		return -ENOMEM;
 
@@ -1184,7 +1184,7 @@ static int codec_h264_multi_finish_picture(struct amvdec_session *sess)
 	if (!h264->pic_state.active || !h264->pic_state.vbuf)
 		return -EINVAL;
 
-	frame = kzalloc_obj(*frame);
+	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
 	if (!frame)
 		return -ENOMEM;
 

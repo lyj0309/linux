@@ -373,7 +373,7 @@ codec_hevc_get_context(struct amvdec_session *sess)
 	if (hevc)
 		return hevc;
 
-	hevc = kzalloc_obj(*hevc);
+	hevc = kzalloc(sizeof(*hevc), GFP_KERNEL);
 	if (!hevc)
 		return NULL;
 
