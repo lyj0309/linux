@@ -53,9 +53,6 @@
 #define SEARCH_PATTERN_LEN	512
 #define VP9_HEADER_SIZE		16
 
-static DECLARE_WAIT_QUEUE_HEAD(wq);
-static int search_done;
-
 static irqreturn_t esparser_isr(int irq, void *dev)
 {
 	int int_status;
@@ -67,8 +64,8 @@ static irqreturn_t esparser_isr(int irq, void *dev)
 	if (int_status & PARSER_INTSTAT_SC_FOUND) {
 		amvdec_write_parser(core, PFIFO_RD_PTR, 0);
 		amvdec_write_parser(core, PFIFO_WR_PTR, 0);
-		search_done = 1;
-		wake_up_interruptible(&wq);
+		WRITE_ONCE(core->esparser_search_done, true);
+		wake_up_interruptible(&core->esparser_wq);
 	}
 
 	return IRQ_HANDLED;
@@ -224,12 +221,14 @@ esparser_write_data(struct amvdec_core *core, dma_addr_t addr, u32 size)
 			    (size << ES_PACK_SIZE_BIT));
 
 	amvdec_write_parser(core, PARSER_FETCH_ADDR, addr);
+	WRITE_ONCE(core->esparser_search_done, false);
 	amvdec_write_parser(core, PARSER_FETCH_CMD,
-			    (7 << FETCH_ENDIAN_BIT) |
-			    (size + SEARCH_PATTERN_LEN));
+				    (7 << FETCH_ENDIAN_BIT) |
+				    (size + SEARCH_PATTERN_LEN));
 
-	search_done = 0;
-	return wait_event_interruptible_timeout(wq, search_done, (HZ / 5));
+	return wait_event_interruptible_timeout(core->esparser_wq,
+						READ_ONCE(core->esparser_search_done),
+						HZ / 5);
 }
 
 static u32 esparser_vififo_get_free_space(struct amvdec_session *sess)
@@ -371,19 +370,28 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 
 void esparser_queue_all_src(struct work_struct *work)
 {
-	struct v4l2_m2m_buffer *buf, *n;
 	struct amvdec_session *sess =
 		container_of(work, struct amvdec_session, esparser_queue_work);
+	struct vb2_v4l2_buffer *vbuf;
+	int ret;
+	bool finish = false;
+
+	if (!atomic_read(&sess->m2m_job_running))
+		return;
 
 	mutex_lock(&sess->lock);
-	v4l2_m2m_for_each_src_buf_safe(sess->m2m_ctx, buf, n) {
-		if (sess->should_stop)
-			break;
-
-		if (esparser_queue(sess, &buf->vb) < 0)
-			break;
+	vbuf = v4l2_m2m_next_src_buf(sess->m2m_ctx);
+	if (sess->should_stop || !vbuf) {
+		finish = true;
+	} else {
+		ret = esparser_queue(sess, vbuf);
+		/* Only a full VIFIFO is retryable with the same source buffer. */
+		finish = ret != -EAGAIN;
 	}
 	mutex_unlock(&sess->lock);
+
+	if (finish)
+		amvdec_m2m_job_finish(sess);
 }
 
 int esparser_power_up(struct amvdec_session *sess)
@@ -434,6 +442,8 @@ int esparser_init(struct platform_device *pdev, struct amvdec_core *core)
 	struct device *dev = &pdev->dev;
 	int ret;
 	int irq;
+
+	init_waitqueue_head(&core->esparser_wq);
 
 	irq = platform_get_irq_byname(pdev, "esparser");
 	if (irq < 0)

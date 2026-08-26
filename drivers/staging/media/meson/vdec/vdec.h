@@ -8,6 +8,7 @@
 #define __MESON_VDEC_CORE_H_
 
 #include <linux/irqreturn.h>
+#include <linux/wait.h>
 #include <linux/regmap.h>
 #include <linux/list.h>
 #include <media/videobuf2-v4l2.h>
@@ -64,8 +65,14 @@ struct amvdec_session;
  * @esparser_reset: RESET for the PARSER
  * @vdev_dec: video device for the decoder
  * @v4l2_dev: v4l2 device
+ * @m2m_dev: device-level v4l2 memory-to-memory scheduler
+ * @esparser_wq: wait queue for parser fetch completion
+ * @esparser_search_done: parser fetch completion flag
  * @cur_sess: current decoding session
  * @lock: video device lock
+ * @hw_lock: serializes decoder hardware ownership transitions
+ * @irq_lock: protects the current session observed by IRQ handlers
+ * @vdec_irq: decoder IRQ used to quiesce the threaded handler on teardown
  */
 struct amvdec_core {
 	void __iomem *dos_base;
@@ -88,9 +95,15 @@ struct amvdec_core {
 
 	struct video_device *vdev_dec;
 	struct v4l2_device v4l2_dev;
+	struct v4l2_m2m_dev *m2m_dev;
+	wait_queue_head_t esparser_wq;
+	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
 	struct mutex lock;
+	struct mutex hw_lock; /* Serializes hardware ownership changes. */
+	spinlock_t irq_lock; /* Protects cur_sess for IRQ handlers. */
+	int vdec_irq;
 };
 
 /**
@@ -183,7 +196,6 @@ enum amvdec_status {
  *
  * @core: reference to the vdec core struct
  * @fh: v4l2 file handle
- * @m2m_dev: v4l2 m2m device
  * @m2m_ctx: v4l2 m2m context
  * @ctrl_handler: V4L2 control handler
  * @ctrl_min_buf_capture: V4L2 control V4L2_CID_MIN_BUFFERS_FOR_CAPTURE
@@ -200,6 +212,7 @@ enum amvdec_status {
  * @pixelaspect: Pixel Aspect Ratio reported by the decoder
  * @esparser_queued_bufs: number of buffers currently queued into ESPARSER
  * @esparser_queue_work: work struct for the ESPARSER to process src buffers
+ * @m2m_job_running: whether this context currently owns the m2m scheduler
  * @streamon_cap: stream on flag for capture queue
  * @streamon_out: stream on flag for output queue
  * @sequence_cap: capture sequence counter
@@ -230,7 +243,6 @@ struct amvdec_session {
 	struct amvdec_core *core;
 
 	struct v4l2_fh fh;
-	struct v4l2_m2m_dev *m2m_dev;
 	struct v4l2_m2m_ctx *m2m_ctx;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *ctrl_min_buf_capture;
@@ -251,6 +263,7 @@ struct amvdec_session {
 
 	atomic_t esparser_queued_bufs;
 	struct work_struct esparser_queue_work;
+	atomic_t m2m_job_running;
 
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
@@ -288,5 +301,7 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+void amvdec_m2m_job_finish(struct amvdec_session *sess);
+void amvdec_m2m_retry_job(struct amvdec_session *sess);
 
 #endif
