@@ -275,6 +275,7 @@ enum amvdec_m2m_job_state {
  * @width: current picture width
  * @height: current picture height
  * @colorspace: current colorspace
+ * @bitdepth: current luma and chroma bit depth
  * @ycbcr_enc: current ycbcr_enc
  * @quantization: current quantization
  * @xfer_func: current transfer function
@@ -290,9 +291,9 @@ enum amvdec_m2m_job_state {
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
-	 * @num_dst_bufs: number of destination buffers
-	 * @changed_format: the format changed
-	 * @source_change_pending: capture buffers need renegotiation
+ * @num_dst_bufs: number of destination buffers
+ * @changed_format: the format changed
+ * @source_change_pending: capture buffers need renegotiation
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
  * @canvas_regs: DOS registers containing the session canvas mappings
@@ -401,6 +402,7 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+bool amvdec_session_is_current(struct amvdec_session *sess);
 int amvdec_m2m_job_start(struct amvdec_session *sess);
 void amvdec_m2m_job_finish(struct amvdec_session *sess);
 void amvdec_m2m_job_yield(struct amvdec_session *sess);

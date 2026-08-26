@@ -320,6 +320,8 @@ esparser_queue_locked(struct amvdec_session *sess,
 			num_dst_bufs = codec_ops->num_pending_bufs(sess);
 
 		num_dst_bufs += v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx);
+		if (num_dst_bufs <= 3)
+			return -EAGAIN;
 		num_dst_bufs -= 3;
 
 		if (esparser_vififo_get_free_space(sess) < payload_size ||
@@ -433,7 +435,7 @@ void esparser_queue_all_src(struct work_struct *work)
 		mutex_lock(&core->hw_lock);
 		if (atomic_read(&sess->m2m_job_running) !=
 		    AMVDEC_M2M_JOB_RUNNING ||
-		    core->cur_sess != sess) {
+		    !amvdec_session_is_current(sess)) {
 			mutex_unlock(&core->hw_lock);
 			mutex_unlock(&sess->lock);
 			return;
@@ -460,8 +462,12 @@ int esparser_power_up(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+	int ret;
 
-	reset_control_reset(core->esparser_reset);
+	ret = reset_control_reset(core->esparser_reset);
+	if (ret)
+		return ret;
+
 	amvdec_write_parser(core, PARSER_CONFIG,
 			    (10 << PS_CFG_PFIFO_EMPTY_CNT_BIT) |
 			    (1  << PS_CFG_MAX_ES_WR_CYCLE_BIT) |

@@ -69,16 +69,30 @@ static int vdec_session_irq(struct amvdec_session *sess)
 }
 
 static struct amvdec_session *
-vdec_current_session(struct amvdec_core *core, int irq)
+vdec_get_current_session(struct amvdec_core *core)
 {
 	struct amvdec_session *sess;
 	unsigned long flags;
 
 	spin_lock_irqsave(&core->irq_lock, flags);
 	sess = core->cur_sess;
-	if (sess && vdec_session_irq(sess) != irq)
-		sess = NULL;
 	spin_unlock_irqrestore(&core->irq_lock, flags);
+
+	return sess;
+}
+
+bool amvdec_session_is_current(struct amvdec_session *sess)
+{
+	return vdec_get_current_session(sess->core) == sess;
+}
+
+static struct amvdec_session *
+vdec_current_session(struct amvdec_core *core, int irq)
+{
+	struct amvdec_session *sess = vdec_get_current_session(core);
+
+	if (sess && vdec_session_irq(sess) != irq)
+		return NULL;
 
 	return sess;
 }
@@ -139,7 +153,14 @@ static int vdec_poweron(struct amvdec_session *sess)
 		goto disable_dos;
 	}
 
-	esparser_power_up(sess);
+	ret = esparser_power_up(sess);
+	if (ret) {
+		vdec_ops->stop(sess);
+		if (codec_ops->release && sess->priv)
+			codec_ops->release(sess);
+		goto disable_dos;
+	}
+
 	if (codec_ops->run) {
 		ret = codec_ops->run(sess);
 		if (ret) {
@@ -306,9 +327,9 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 		ret = -ECANCELED;
 		goto unlock;
 	}
-	if (core->cur_sess == sess)
+	if (amvdec_session_is_current(sess))
 		goto unlock;
-	if (core->cur_sess) {
+	if (vdec_get_current_session(core)) {
 		ret = -EBUSY;
 		goto unlock;
 	}
@@ -354,7 +375,7 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 		disable_irq(irq);
 
 	mutex_lock(&core->hw_lock);
-	is_current = core->cur_sess == sess;
+	is_current = amvdec_session_is_current(sess);
 	if (is_current || (synchronize && *hw_slot == sess)) {
 		if (synchronize) {
 			if (is_current)
@@ -484,19 +505,18 @@ static void process_num_buffers(struct vb2_queue *q,
 	unsigned int buffers_total = q_num_bufs + *num_buffers;
 	u32 min_buf_capture = v4l2_ctrl_g_ctrl(sess->ctrl_min_buf_capture);
 
-	if (q_num_bufs + *num_buffers < min_buf_capture)
-		*num_buffers = min_buf_capture - q_num_bufs;
-	if (is_reqbufs && buffers_total < fmt_out->min_buffers)
-		*num_buffers = fmt_out->min_buffers - q_num_bufs;
-	if (buffers_total > fmt_out->max_buffers)
-		*num_buffers = fmt_out->max_buffers - q_num_bufs;
+	buffers_total = max(buffers_total, min_buf_capture);
+	if (is_reqbufs)
+		buffers_total = max(buffers_total, fmt_out->min_buffers);
+	buffers_total = min(buffers_total, fmt_out->max_buffers);
+	*num_buffers = buffers_total - q_num_bufs;
 
 	/* We need to program the complete CAPTURE buffer list
 	 * in registers during start_streaming, and the firmwares
 	 * are free to choose any of them to write frames to. As such,
 	 * we need all of them to be queued into the driver
 	 */
-	sess->num_dst_bufs = q_num_bufs + *num_buffers;
+	sess->num_dst_bufs = buffers_total;
 	q->min_queued_buffers = max(fmt_out->min_buffers, sess->num_dst_bufs);
 }
 
@@ -634,6 +654,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (sess->status == STATUS_NEEDS_RESUME &&
 	    q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    sess->changed_format) {
+		v4l2_m2m_clear_state(sess->m2m_ctx);
 		ret = codec_ops->resume(sess);
 		if (ret)
 			goto bufs_done;
@@ -798,7 +819,7 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 			kthread_stop(sess->recycle_thread);
 
 		if (*hw_slot == sess) {
-			if (core->cur_sess == sess) {
+			if (amvdec_session_is_current(sess)) {
 				vdec_set_current_session(core, NULL);
 				vdec_poweroff(sess);
 			} else {
