@@ -32,6 +32,7 @@ struct dummy_buf {
 
 /* 16 MiB for parsed bitstream swap exchange */
 #define SIZE_VIFIFO SZ_16M
+#define VDEC_INACTIVE_TIMEOUT_MS 1000
 
 static u32 get_output_size(const struct amvdec_codec_ops *codec_ops,
 			   u32 width, u32 height)
@@ -120,6 +121,9 @@ static int vdec_poweron(struct amvdec_session *sess)
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
+	WRITE_ONCE(sess->hardware_stalled, false);
+	WRITE_ONCE(sess->irq_seen, false);
+
 	ret = clk_prepare_enable(sess->core->dos_parser_clk);
 	if (ret)
 		return ret;
@@ -162,6 +166,9 @@ static int vdec_resume(struct amvdec_session *sess, bool reload_firmware)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	int ret;
 
+	WRITE_ONCE(sess->hardware_stalled, false);
+	WRITE_ONCE(sess->irq_seen, false);
+
 	ret = vdec_ops->resume(sess, reload_firmware);
 	if (ret)
 		return ret;
@@ -196,10 +203,25 @@ static void vdec_stop_suspended_hardware(struct amvdec_session *sess)
 
 static void vdec_wait_inactive(struct amvdec_session *sess)
 {
+	u64 deadline = get_jiffies_64() +
+		msecs_to_jiffies(VDEC_INACTIVE_TIMEOUT_MS);
+	bool stalled;
+
 	/* We consider 50ms with no IRQ to be inactive. */
 	while (time_is_after_jiffies64(sess->last_irq_jiffies +
-				       msecs_to_jiffies(50)))
+				       msecs_to_jiffies(50)) &&
+	       time_before64(get_jiffies_64(), deadline))
 		msleep(25);
+
+	stalled = READ_ONCE(sess->irq_seen) &&
+		  time_is_after_jiffies64(sess->last_irq_jiffies +
+					 msecs_to_jiffies(50));
+	WRITE_ONCE(sess->hardware_stalled, stalled);
+
+	if (stalled)
+		dev_warn(sess->core->dev,
+			 "decoder did not become inactive within %u ms\n",
+			 VDEC_INACTIVE_TIMEOUT_MS);
 }
 
 static void vdec_poweroff(struct amvdec_session *sess)
@@ -259,7 +281,7 @@ static void vdec_m2m_device_run(void *priv)
 {
 	struct amvdec_session *sess = priv;
 
-	atomic_set(&sess->m2m_job_running, 1);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_RUNNING);
 	schedule_work(&sess->esparser_queue_work);
 }
 
@@ -280,7 +302,7 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 	disable_irq(irq);
 	mutex_lock(&core->hw_lock);
-	if (!atomic_read(&sess->m2m_job_running)) {
+	if (atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_RUNNING) {
 		ret = -ECANCELED;
 		goto unlock;
 	}
@@ -357,14 +379,40 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 		enable_irq(irq);
 }
 
+static bool vdec_m2m_finish_drain(struct amvdec_session *sess)
+{
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+
+	if (!codec_ops->async_drain || !READ_ONCE(sess->draining) ||
+	    atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_IDLE ||
+	    v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	    (codec_ops->has_pending_job && codec_ops->has_pending_job(sess)))
+		return false;
+
+	if (cmpxchg(&sess->draining, 1U, 0U) != 1U)
+		return false;
+
+	sess->should_stop = 1;
+	if (codec_ops->drain)
+		codec_ops->drain(sess);
+	v4l2_m2m_mark_stopped(sess->m2m_ctx);
+
+	return true;
+}
+
 static void vdec_m2m_complete_job(struct amvdec_session *sess,
 				  bool synchronize)
 {
-	if (atomic_cmpxchg(&sess->m2m_job_running, 1, 0) != 1)
+	if (atomic_cmpxchg(&sess->m2m_job_running,
+			   AMVDEC_M2M_JOB_RUNNING,
+			   AMVDEC_M2M_JOB_COMPLETING) !=
+	    AMVDEC_M2M_JOB_RUNNING)
 		return;
 
 	if (sess->fmt_out->codec_ops->context_switching)
 		vdec_m2m_release_hardware(sess, synchronize);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_IDLE);
+	vdec_m2m_finish_drain(sess);
 
 	v4l2_m2m_job_finish(sess->core->m2m_dev, sess->m2m_ctx);
 }
@@ -381,7 +429,7 @@ void amvdec_m2m_job_yield(struct amvdec_session *sess)
 
 void amvdec_m2m_retry_job(struct amvdec_session *sess)
 {
-	if (atomic_read(&sess->m2m_job_running))
+	if (atomic_read(&sess->m2m_job_running) == AMVDEC_M2M_JOB_RUNNING)
 		schedule_work(&sess->esparser_queue_work);
 }
 
@@ -399,6 +447,9 @@ static int vdec_m2m_job_ready(void *priv)
 	struct amvdec_session *sess = priv;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	bool src_ready;
+
+	if (READ_ONCE(sess->source_change_pending))
+		return 0;
 
 	if (!sess->streamon_out)
 		return 0;
@@ -548,7 +599,7 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 		return;
 	if ((vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
 	     (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && !held)) &&
-	    atomic_read(&sess->m2m_job_running))
+	    atomic_read(&sess->m2m_job_running) == AMVDEC_M2M_JOB_RUNNING)
 		schedule_work(&sess->esparser_queue_work);
 
 	if (sess->streamon_cap &&
@@ -587,6 +638,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 		if (ret)
 			goto bufs_done;
 		sess->status = STATUS_RUNNING;
+		WRITE_ONCE(sess->source_change_pending, false);
 		goto unlock_ok;
 	}
 
@@ -1103,10 +1155,12 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 	if (codec_ops->context_switching &&
 	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	     atomic_read(&sess->esparser_queued_bufs) ||
 	     (codec_ops->async_drain &&
-	      atomic_read(&sess->m2m_job_running)))) {
-		sess->draining = true;
-		v4l2_m2m_try_schedule(sess->m2m_ctx);
+	      atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_IDLE))) {
+		WRITE_ONCE(sess->draining, 1);
+		if (!vdec_m2m_finish_drain(sess))
+			v4l2_m2m_try_schedule(sess->m2m_ctx);
 		return 0;
 	}
 
@@ -1277,7 +1331,7 @@ static int vdec_open(struct file *file)
 	INIT_LIST_HEAD(&sess->timestamps);
 	INIT_LIST_HEAD(&sess->bufs_recycle);
 	INIT_WORK(&sess->esparser_queue_work, esparser_queue_all_src);
-	atomic_set(&sess->m2m_job_running, 0);
+	atomic_set(&sess->m2m_job_running, AMVDEC_M2M_JOB_IDLE);
 	mutex_init(&sess->lock);
 	mutex_init(&sess->bufs_recycle_lock);
 	spin_lock_init(&sess->ts_spinlock);
@@ -1330,8 +1384,10 @@ static irqreturn_t vdec_isr(int irq, void *data)
 	struct amvdec_session *sess;
 
 	sess = vdec_current_session(core, irq);
-	if (sess)
+	if (sess) {
 		sess->last_irq_jiffies = get_jiffies_64();
+		WRITE_ONCE(sess->irq_seen, true);
+	}
 
 	if (!sess)
 		return IRQ_NONE;

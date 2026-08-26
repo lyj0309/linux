@@ -402,7 +402,7 @@ void esparser_queue_all_src(struct work_struct *work)
 	bool finish = false;
 	bool queue_next = false;
 
-	if (!atomic_read(&sess->m2m_job_running))
+	if (atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_RUNNING)
 		return;
 	if (codec_ops->has_pending_job && codec_ops->job_ready)
 		codec_job = codec_ops->has_pending_job(sess) &&
@@ -420,7 +420,7 @@ void esparser_queue_all_src(struct work_struct *work)
 	}
 
 	mutex_lock(&sess->lock);
-	if (!atomic_read(&sess->m2m_job_running)) {
+	if (atomic_read(&sess->m2m_job_running) != AMVDEC_M2M_JOB_RUNNING) {
 		mutex_unlock(&sess->lock);
 		return;
 	}
@@ -431,7 +431,8 @@ void esparser_queue_all_src(struct work_struct *work)
 		finish = !codec_job;
 	} else {
 		mutex_lock(&core->hw_lock);
-		if (!atomic_read(&sess->m2m_job_running) ||
+		if (atomic_read(&sess->m2m_job_running) !=
+		    AMVDEC_M2M_JOB_RUNNING ||
 		    core->cur_sess != sess) {
 			mutex_unlock(&core->hw_lock);
 			mutex_unlock(&sess->lock);

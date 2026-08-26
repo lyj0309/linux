@@ -254,6 +254,12 @@ enum amvdec_status {
 	STATUS_NEEDS_RESUME,
 };
 
+enum amvdec_m2m_job_state {
+	AMVDEC_M2M_JOB_IDLE,
+	AMVDEC_M2M_JOB_RUNNING,
+	AMVDEC_M2M_JOB_COMPLETING,
+};
+
 /**
  * struct amvdec_session - decoding session parameters
  *
@@ -275,7 +281,7 @@ enum amvdec_status {
  * @pixelaspect: Pixel Aspect Ratio reported by the decoder
  * @esparser_queued_bufs: number of buffers currently queued into ESPARSER
  * @esparser_queue_work: work struct for the ESPARSER to process src buffers
- * @m2m_job_running: whether this context currently owns the m2m scheduler
+ * @m2m_job_running: current state of this context in the m2m scheduler
  * @streamon_cap: stream on flag for capture queue
  * @streamon_out: stream on flag for output queue
  * @sequence_cap: capture sequence counter
@@ -284,8 +290,9 @@ enum amvdec_status {
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
- * @num_dst_bufs: number of destination buffers
- * @changed_format: the format changed
+	 * @num_dst_bufs: number of destination buffers
+	 * @changed_format: the format changed
+	 * @source_change_pending: capture buffers need renegotiation
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
  * @canvas_regs: DOS registers containing the session canvas mappings
@@ -308,6 +315,8 @@ enum amvdec_status {
  * @timestamps: chronological list of src timestamps
  * @ts_spinlock: spinlock for the timestamps list
  * @last_irq_jiffies: tracks last time the vdec triggered an IRQ
+ * @irq_seen: decoder has produced at least one interrupt
+ * @hardware_stalled: decoder stopped responding before teardown
  * @last_offset: tracks last offset of vififo
  * @wrap_count: number of times the vififo wrapped around
  * @fw_idx_to_vb2_idx: firmware buffer index to vb2 buffer index
@@ -344,10 +353,11 @@ struct amvdec_session {
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
 	unsigned int should_stop;
-	bool draining;
+	unsigned int draining;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;
+	bool source_change_pending;
 
 	u8 canvas_alloc[MAX_CANVAS];
 	u32 canvas_num;
@@ -375,6 +385,8 @@ struct amvdec_session {
 	spinlock_t ts_spinlock; /* timestamp list lock */
 
 	u64 last_irq_jiffies;
+	bool irq_seen;
+	bool hardware_stalled;
 	u32 last_offset;
 	u32 wrap_count;
 	u32 fw_idx_to_vb2_idx[32];
