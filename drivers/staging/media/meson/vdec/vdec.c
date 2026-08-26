@@ -1057,9 +1057,10 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 	dev_dbg(dev, "Received V4L2_DEC_CMD_STOP\n");
 
-	if (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
-	    (codec_ops->async_drain && codec_ops->context_switching &&
-	     atomic_read(&sess->m2m_job_running))) {
+	if (codec_ops->context_switching &&
+	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
+	     (codec_ops->async_drain &&
+	      atomic_read(&sess->m2m_job_running)))) {
 		sess->draining = true;
 		v4l2_m2m_try_schedule(sess->m2m_ctx);
 		return 0;
