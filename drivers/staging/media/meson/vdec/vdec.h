@@ -106,6 +106,7 @@ struct amvdec_core {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev;
 	wait_queue_head_t esparser_wq;
+	struct mutex parser_lock; /* Serializes shared parser and PFIFO access. */
 	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
@@ -137,11 +138,18 @@ struct amvdec_ops {
  * struct amvdec_codec_ops - codec operations
  *
  * @start: mandatory call when the codec needs to initialize
+ * @run: optional call after the decoder and parser hardware have started
+ * @input_queued: optional call after compressed input has entered the VIFIFO
+ * @can_queue_input: optional call to determine whether input can be queued
+ * @async_drain: finish queued input before completing a decoder stop command
  * @stop: mandatory call when the codec needs to stop
  * @release: optional call to release session resources after hardware stop
  * @context_switching: the codec can save and restore its hardware context
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
+ * @has_pending_job: optional call if the codec has work that can run without
+ *		     a new OUTPUT buffer
+ * @job_ready: optional call to check whether a pending codec job can run
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
  * @can_recycle: optional call to know if the codec is ready to recycle
  *		 a dst buffer
@@ -156,6 +164,10 @@ struct amvdec_ops {
  */
 struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
+	void (*run)(struct amvdec_session *sess);
+	void (*input_queued)(struct amvdec_session *sess, u32 payload_size);
+	bool (*can_queue_input)(struct amvdec_session *sess);
+	bool async_drain;
 	int (*stop)(struct amvdec_session *sess);
 	void (*release)(struct amvdec_session *sess);
 	bool context_switching;
@@ -163,6 +175,8 @@ struct amvdec_codec_ops {
 				const u8 *data, u32 len);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
+	bool (*has_pending_job)(struct amvdec_session *sess);
+	bool (*job_ready)(struct amvdec_session *sess);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
@@ -237,6 +251,7 @@ enum amvdec_status {
  * @sequence_out: output sequence counter
  * @should_stop: flag set if userspace signaled EOS via command
  *		 or empty buffer
+ * @draining: queued input is being drained before decoder stop
  * @keyframe_found: flag set once a keyframe has been parsed
  * @num_dst_bufs: number of destination buffers
  * @changed_format: the format changed
@@ -294,6 +309,7 @@ struct amvdec_session {
 	unsigned int streamon_cap, streamon_out;
 	unsigned int sequence_cap, sequence_out;
 	unsigned int should_stop;
+	bool draining;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;

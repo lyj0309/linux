@@ -91,6 +91,14 @@ static int canvas_alloc(struct amvdec_session *sess, u8 *canvas_id)
 		return ret;
 
 	sess->canvas_alloc[sess->canvas_num++] = *canvas_id;
+	if (!*canvas_id) {
+		if (sess->canvas_num >= MAX_CANVAS)
+			return -ENOMEM;
+		ret = meson_canvas_alloc(sess->core->canvas, canvas_id);
+		if (ret)
+			return ret;
+		sess->canvas_alloc[sess->canvas_num++] = *canvas_id;
+	}
 	return 0;
 }
 
@@ -176,13 +184,47 @@ static int set_canvas_nv12m(struct amvdec_session *sess,
 	return 0;
 }
 
+static int set_canvas_nv12(struct amvdec_session *sess,
+			   struct vb2_buffer *vb, u32 width,
+			   u32 height, u32 reg)
+{
+	struct amvdec_core *core = sess->core;
+	dma_addr_t buf_paddr;
+	u8 canvas_id[NUM_CANVAS_NV12]; /* Y U/V */
+	int ret, i;
+
+	for (i = 0; i < NUM_CANVAS_NV12; i++) {
+		ret = canvas_alloc(sess, &canvas_id[i]);
+		if (ret)
+			return ret;
+	}
+
+	buf_paddr = vb2_dma_contig_plane_dma_addr(vb, 0);
+	meson_canvas_config(core->canvas, canvas_id[0], buf_paddr,
+			    width, height, MESON_CANVAS_WRAP_NONE,
+			    MESON_CANVAS_BLKMODE_LINEAR,
+			    MESON_CANVAS_ENDIAN_SWAP64);
+	meson_canvas_config(core->canvas, canvas_id[1],
+			    buf_paddr + amvdec_get_output_size(sess),
+			    width, height / 2, MESON_CANVAS_WRAP_NONE,
+			    MESON_CANVAS_BLKMODE_LINEAR,
+			    MESON_CANVAS_ENDIAN_SWAP64);
+
+	amvdec_write_dos(core, reg,
+			 canvas_id[1] << 16 |
+			 canvas_id[1] << 8 |
+			 canvas_id[0]);
+
+	return 0;
+}
+
 int amvdec_set_canvases(struct amvdec_session *sess,
 			u32 reg_base[], u32 reg_num[])
 {
 	struct v4l2_m2m_buffer *buf;
 	u32 pixfmt = sess->pixfmt_cap;
-	u32 width = ALIGN(sess->width, 32);
-	u32 height = ALIGN(sess->height, 32);
+	u32 width = ALIGN(sess->width, 64);
+	u32 height = ALIGN(sess->height, 64);
 	u32 reg_cur;
 	u32 reg_num_cur = 0;
 	u32 reg_base_cur = 0;
@@ -204,6 +246,12 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 		reg_cur = reg_base[reg_base_cur] + reg_num_cur * 4;
 
 		switch (pixfmt) {
+		case V4L2_PIX_FMT_NV12:
+			ret = set_canvas_nv12(sess, &buf->vb.vb2_buf, width,
+					      height, reg_cur);
+			if (ret)
+				goto free_canvases;
+			break;
 		case V4L2_PIX_FMT_NV12M:
 			ret = set_canvas_nv12m(sess, &buf->vb.vb2_buf, width,
 					       height, reg_cur);
@@ -318,6 +366,10 @@ static void dst_buf_done(struct amvdec_session *sess,
 	u32 output_size = amvdec_get_output_size(sess);
 
 	switch (sess->pixfmt_cap) {
+	case V4L2_PIX_FMT_NV12:
+		vb2_set_plane_payload(&vbuf->vb2_buf, 0,
+				      output_size + output_size / 2);
+		break;
 	case V4L2_PIX_FMT_NV12M:
 		vb2_set_plane_payload(&vbuf->vb2_buf, 0, output_size);
 		vb2_set_plane_payload(&vbuf->vb2_buf, 1, output_size / 2);
@@ -508,22 +560,21 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	static const struct v4l2_event ev = {
 		.type = V4L2_EVENT_SOURCE_CHANGE,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
+	bool capture_ready;
 
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, dpb_size);
 
-	/*
-	 * Check if the capture queue is already configured well for our
-	 * usecase. If so, keep decoding with it and do not send the event
-	 */
-	if (sess->streamon_cap &&
-	    sess->width == width &&
-	    sess->height == height &&
-	    dpb_size <= sess->num_dst_bufs) {
+	capture_ready = sess->width == width && sess->height == height &&
+			dpb_size <= sess->num_dst_bufs;
+
+	/* Keep decoding if the active capture queue can hold the new format. */
+	if (sess->streamon_cap && capture_ready) {
 		sess->fmt_out->codec_ops->resume(sess);
 		return;
 	}
 
-	sess->changed_format = 0;
+	/* A compatible queue may have been allocated before this event. */
+	sess->changed_format = capture_ready;
 	sess->width = width;
 	sess->height = height;
 	sess->status = STATUS_NEEDS_RESUME;

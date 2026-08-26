@@ -109,6 +109,8 @@ static int vdec_poweron(struct amvdec_session *sess)
 	}
 
 	esparser_power_up(sess);
+	if (codec_ops->run)
+		codec_ops->run(sess);
 
 	return 0;
 
@@ -186,6 +188,10 @@ int amvdec_m2m_job_start(struct amvdec_session *sess)
 
 	disable_irq(core->vdec_irq);
 	mutex_lock(&core->hw_lock);
+	if (!atomic_read(&sess->m2m_job_running)) {
+		ret = -ECANCELED;
+		goto unlock;
+	}
 	if (core->cur_sess == sess)
 		goto unlock;
 	if (core->cur_sess) {
@@ -214,14 +220,12 @@ static void vdec_m2m_release_hardware(struct amvdec_session *sess,
 	if (synchronize)
 		disable_irq(core->vdec_irq);
 
-	mutex_lock(&sess->lock);
 	mutex_lock(&core->hw_lock);
 	if (core->cur_sess == sess) {
 		vdec_suspend(sess);
 		vdec_set_current_session(core, NULL);
 	}
 	mutex_unlock(&core->hw_lock);
-	mutex_unlock(&sess->lock);
 
 	if (synchronize)
 		enable_irq(core->vdec_irq);
@@ -267,12 +271,22 @@ static void vdec_m2m_job_abort(void *priv)
 static int vdec_m2m_job_ready(void *priv)
 {
 	struct amvdec_session *sess = priv;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	bool src_ready;
 
 	if (!sess->streamon_out)
 		return 0;
+	if (codec_ops->has_pending_job &&
+	    codec_ops->has_pending_job(sess))
+		return sess->streamon_cap && codec_ops->job_ready &&
+			codec_ops->job_ready(sess);
+
+	src_ready = v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) > 0;
+	if (!src_ready)
+		return 0;
 
 	if (sess->status == STATUS_INIT && !sess->streamon_cap)
-		return 1;
+		return src_ready;
 
 	return sess->streamon_cap &&
 		v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) > 0;
@@ -326,6 +340,11 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 			break;
 		case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 			switch (sess->pixfmt_cap) {
+			case V4L2_PIX_FMT_NV12:
+				if (*num_planes != 1 ||
+				    sizes[0] < output_size + output_size / 2)
+					return -EINVAL;
+				break;
 			case V4L2_PIX_FMT_NV12M:
 				if (*num_planes != 2 ||
 				    sizes[0] < output_size ||
@@ -357,6 +376,10 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 		switch (sess->pixfmt_cap) {
+		case V4L2_PIX_FMT_NV12:
+			sizes[0] = output_size + output_size / 2;
+			*num_planes = 1;
+			break;
 		case V4L2_PIX_FMT_NV12M:
 			sizes[0] = output_size;
 			sizes[1] = output_size / 2;
@@ -392,6 +415,9 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 
 	if (!sess->streamon_out)
 		return;
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	    atomic_read(&sess->m2m_job_running))
+		schedule_work(&sess->esparser_queue_work);
 
 	if (sess->streamon_cap &&
 	    vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
@@ -690,7 +716,11 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 			pixmp->pixelformat = fmt_out->pixfmts_cap[0];
 
 		memset(pfmt[1].reserved, 0, sizeof(pfmt[1].reserved));
-		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M) {
+		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12) {
+			pfmt[0].sizeimage = output_size + output_size / 2;
+			pfmt[0].bytesperline = ALIGN(pixmp->width, 32);
+			pixmp->num_planes = 1;
+		} else if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M) {
 			pfmt[0].sizeimage = output_size;
 			pfmt[0].bytesperline = ALIGN(pixmp->width, 32);
 
@@ -883,6 +913,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
 		v4l2_m2m_clear_state(sess->m2m_ctx);
 		sess->should_stop = 0;
+		sess->draining = false;
 		return 0;
 	}
 
@@ -891,6 +922,14 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		return -EINVAL;
 
 	dev_dbg(dev, "Received V4L2_DEC_CMD_STOP\n");
+
+	if (codec_ops->async_drain &&
+	    (atomic_read(&sess->m2m_job_running) ||
+	     v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx))) {
+		sess->draining = true;
+		v4l2_m2m_try_schedule(sess->m2m_ctx);
+		return 0;
+	}
 
 	sess->should_stop = 1;
 
@@ -1041,6 +1080,8 @@ static int vdec_open(struct file *file)
 	}
 	sess->m2m_ctx->ignore_cap_streaming = true;
 	sess->m2m_ctx->cap_q_ctx.buffered = true;
+	/* job_ready gates input and permits codec-internal resume jobs. */
+	sess->m2m_ctx->out_q_ctx.buffered = true;
 
 	ret = vdec_init_ctrls(sess);
 	if (ret)
@@ -1169,6 +1210,7 @@ static int vdec_probe(struct platform_device *pdev)
 	core->dev = dev;
 	mutex_init(&core->lock);
 	mutex_init(&core->hw_lock);
+	mutex_init(&core->parser_lock);
 	spin_lock_init(&core->irq_lock);
 	platform_set_drvdata(pdev, core);
 
@@ -1218,7 +1260,9 @@ static int vdec_probe(struct platform_device *pdev)
 	if (IS_ERR(core->vdec_hevc_clk))
 		return -EPROBE_DEFER;
 
-	irq = platform_get_irq_byname(pdev, "vdec");
+	irq = platform_get_irq_byname_optional(pdev, "mbox1");
+	if (irq == -ENXIO)
+		irq = platform_get_irq_byname(pdev, "vdec");
 	if (irq < 0)
 		return irq;
 	core->vdec_irq = irq;

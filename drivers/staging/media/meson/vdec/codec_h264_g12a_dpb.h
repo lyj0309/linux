@@ -3,7 +3,7 @@
 #ifndef __MESON_VDEC_CODEC_H264_MULTI_DPB_H_
 #define __MESON_VDEC_CODEC_H264_MULTI_DPB_H_
 
-#include "codec_h264_multi.h"
+#include "codec_h264_g12a.h"
 
 #define H264_MULTI_DPB_SIZE	V4L2_H264_NUM_DPB_ENTRIES
 
@@ -95,5 +95,13 @@ void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
 			    const struct h264_multi_config *config,
 			    const struct h264_multi_picture *picture,
 			    struct v4l2_h264_dpb_entry *entries);
+int h264_multi_dpb_reorder_reflist(const struct h264_multi_dpb *dpb,
+				   const struct h264_multi_config *config,
+				   const struct h264_multi_picture *picture,
+				   struct v4l2_h264_reference *refs,
+				   unsigned int num_valid,
+				   unsigned int num_active,
+				   const u16 *commands,
+				   unsigned int num_commands);
 
 #endif

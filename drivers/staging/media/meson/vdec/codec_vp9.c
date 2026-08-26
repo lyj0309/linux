@@ -2130,7 +2130,11 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 
 	codec_vp9_fetch_rpm(sess);
 	if (codec_vp9_process_rpm(vp9)) {
+		mutex_unlock(&vp9->lock);
 		amvdec_src_change(sess, vp9->width, vp9->height, 16);
+		mutex_lock(&vp9->lock);
+		if (sess->status == STATUS_RUNNING)
+			goto unlock;
 
 		/* No frame is actually processed */
 		vp9->cur_frame = NULL;
