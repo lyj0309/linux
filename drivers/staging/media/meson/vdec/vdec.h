@@ -54,6 +54,12 @@ struct amvdec_timestamp_info {
 
 struct amvdec_session;
 
+enum amvdec_irq {
+	AMVDEC_IRQ_MBOX1,
+	AMVDEC_IRQ_MBOX0,
+	AMVDEC_NUM_IRQS,
+};
+
 /**
  * struct amvdec_core - device parameters, singleton
  *
@@ -81,7 +87,7 @@ struct amvdec_session;
  * @lock: video device lock
  * @hw_lock: serializes decoder hardware ownership transitions
  * @irq_lock: protects the current session observed by IRQ handlers
- * @vdec_irq: decoder IRQ used to quiesce the threaded handler on teardown
+ * @irqs: decoder mailbox IRQs
  */
 struct amvdec_core {
 	void __iomem *dos_base;
@@ -115,7 +121,7 @@ struct amvdec_core {
 	struct mutex lock;
 	struct mutex hw_lock; /* Serializes hardware ownership changes. */
 	spinlock_t irq_lock; /* Protects cur_sess for IRQ handlers. */
-	int vdec_irq;
+	int irqs[AMVDEC_NUM_IRQS];
 };
 
 /**
@@ -144,6 +150,7 @@ struct amvdec_ops {
  * @async_drain: finish queued input before completing a decoder stop command
  * @stop: mandatory call when the codec needs to stop
  * @release: optional call to release session resources after hardware stop
+ * @irq: mailbox interrupt used by the codec firmware
  * @context_switching: the codec can save and restore its hardware context
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
@@ -170,6 +177,7 @@ struct amvdec_codec_ops {
 	bool async_drain;
 	int (*stop)(struct amvdec_session *sess);
 	void (*release)(struct amvdec_session *sess);
+	enum amvdec_irq irq;
 	bool context_switching;
 	int (*prepare_firmware)(struct amvdec_session *sess,
 				const u8 *data, u32 len);
@@ -296,6 +304,7 @@ struct amvdec_session {
 	u32 width;
 	u32 height;
 	u32 colorspace;
+	u8 bitdepth;
 	u8 ycbcr_enc;
 	u8 quantization;
 	u8 xfer_func;

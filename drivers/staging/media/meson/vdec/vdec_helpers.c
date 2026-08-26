@@ -77,6 +77,38 @@ u32 amvdec_am21c_size(u32 width, u32 height)
 }
 EXPORT_SYMBOL_GPL(amvdec_am21c_size);
 
+/* AMFBC body is made out of 64x32 blocks with varying block size */
+u32 amvdec_amfbc_body_size(u32 width, u32 height, bool is_10bit,
+			   bool use_mmu)
+{
+	u32 width_64 = ALIGN(width, 64) / 64;
+	u32 height_32 = ALIGN(height, 32) / 32;
+	u32 blk_size = 4096;
+
+	if (!is_10bit)
+		blk_size = use_mmu ? 3200 : 3072;
+
+	return blk_size * width_64 * height_32;
+}
+EXPORT_SYMBOL_GPL(amvdec_amfbc_body_size);
+
+/* AMFBC headers use 32 bytes per 128x64 block */
+u32 amvdec_amfbc_head_size(u32 width, u32 height)
+{
+	u32 width_128 = ALIGN(width, 128) / 128;
+	u32 height_64 = ALIGN(height, 64) / 64;
+
+	return 32 * width_128 * height_64;
+}
+EXPORT_SYMBOL_GPL(amvdec_amfbc_head_size);
+
+u32 amvdec_amfbc_size(u32 width, u32 height, bool is_10bit, bool use_mmu)
+{
+	return ALIGN(amvdec_amfbc_body_size(width, height, is_10bit, use_mmu) +
+		     amvdec_amfbc_head_size(width, height), SZ_64K);
+}
+EXPORT_SYMBOL_GPL(amvdec_amfbc_size);
+
 static int canvas_alloc(struct amvdec_session *sess, u8 *canvas_id)
 {
 	int ret;
@@ -555,7 +587,7 @@ void amvdec_set_par_from_dar(struct amvdec_session *sess,
 EXPORT_SYMBOL_GPL(amvdec_set_par_from_dar);
 
 void amvdec_src_change(struct amvdec_session *sess, u32 width,
-		       u32 height, u32 dpb_size)
+		       u32 height, u32 dpb_size, u8 bitdepth)
 {
 	static const struct v4l2_event ev = {
 		.type = V4L2_EVENT_SOURCE_CHANGE,
@@ -565,7 +597,9 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	v4l2_ctrl_s_ctrl(sess->ctrl_min_buf_capture, dpb_size);
 
 	capture_ready = sess->width == width && sess->height == height &&
+			(!sess->bitdepth || sess->bitdepth == bitdepth) &&
 			dpb_size <= sess->num_dst_bufs;
+	sess->bitdepth = bitdepth;
 
 	/* Keep decoding if the active capture queue can hold the new format. */
 	if (sess->streamon_cap && capture_ready) {

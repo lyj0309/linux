@@ -32,6 +32,10 @@ void amvdec_write_parser(struct amvdec_core *core, u32 reg, u32 val);
 u32 amvdec_am21c_body_size(u32 width, u32 height);
 u32 amvdec_am21c_head_size(u32 width, u32 height);
 u32 amvdec_am21c_size(u32 width, u32 height);
+u32 amvdec_amfbc_body_size(u32 width, u32 height, bool is_10bit,
+			   bool use_mmu);
+u32 amvdec_amfbc_head_size(u32 width, u32 height);
+u32 amvdec_amfbc_size(u32 width, u32 height, bool is_10bit, bool use_mmu);
 
 /**
  * amvdec_dst_buf_done_idx() - Signal that a buffer is done decoding
@@ -84,9 +88,10 @@ void amvdec_set_par_from_dar(struct amvdec_session *sess,
  * @width: picture width detected by the hardware
  * @height: picture height detected by the hardware
  * @dpb_size: Decoded Picture Buffer size (= amount of buffers for decoding)
+ * @bitdepth: bit depth of the coded content
  */
 void amvdec_src_change(struct amvdec_session *sess, u32 width,
-		       u32 height, u32 dpb_size);
+		       u32 height, u32 dpb_size, u8 bitdepth);
 
 /**
  * amvdec_abort() - Abort the current decoding session

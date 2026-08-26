@@ -654,7 +654,7 @@ static int codec_h264_multi_configure(struct amvdec_session *sess)
 	h264->configuring = true;
 	mutex_unlock(&h264->lock);
 	amvdec_src_change(sess, config.width, config.height,
-			  capture_buf_count);
+			  capture_buf_count, 8);
 	mutex_lock(&h264->lock);
 	h264->configuring = false;
 	return 0;
