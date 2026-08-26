@@ -202,6 +202,68 @@ void h264_multi_dpb_reset(struct h264_multi_dpb *dpb)
 	dpb->current_long_term_frame_idx = -1;
 }
 
+struct h264_level_limit {
+	u8 level_idc;
+	u32 max_dpb_mbs;
+};
+
+static const struct h264_level_limit h264_level_limits[] = {
+	{ 9, 396 },
+	{ 10, 396 },
+	{ 11, 900 },
+	{ 12, 2376 },
+	{ 13, 2376 },
+	{ 20, 2376 },
+	{ 21, 4752 },
+	{ 22, 8100 },
+	{ 30, 8100 },
+	{ 31, 18000 },
+	{ 32, 20480 },
+	{ 40, 32768 },
+	{ 41, 32768 },
+	{ 42, 34816 },
+	{ 50, 110400 },
+	{ 51, 184320 },
+	{ 52, 184320 },
+};
+
+int h264_multi_dpb_buf_count(const struct h264_multi_config *config,
+			     unsigned int *buf_count)
+{
+	u32 frame_mbs;
+	u32 dpb_frames;
+	unsigned int i;
+
+	if (!config || !buf_count || !config->coded_width ||
+	    !config->coded_height)
+		return -EINVAL;
+
+	frame_mbs = DIV_ROUND_UP(config->coded_width, 16) *
+		DIV_ROUND_UP(config->coded_height, 16);
+	for (i = 0; i < ARRAY_SIZE(h264_level_limits); i++) {
+		if (h264_level_limits[i].level_idc == config->level_idc)
+			break;
+	}
+	if (i == ARRAY_SIZE(h264_level_limits))
+		return -EINVAL;
+
+	dpb_frames = clamp(h264_level_limits[i].max_dpb_mbs / frame_mbs,
+			   1U, (u32)H264_MULTI_DPB_SIZE);
+	if (config->bitstream_restriction) {
+		if (config->max_dec_frame_buffering > H264_MULTI_DPB_SIZE ||
+		    config->num_reorder_frames >
+			config->max_dec_frame_buffering ||
+		    config->max_dec_frame_buffering < config->max_refs)
+			return -EINVAL;
+		dpb_frames = max_t(u32, 1, config->max_dec_frame_buffering);
+	} else {
+		dpb_frames = max_t(u32, dpb_frames, config->max_refs);
+	}
+
+	*buf_count = dpb_frames + 1;
+	return 0;
+}
+
 static void h264_multi_dpb_clear_refs(struct h264_multi_dpb *dpb)
 {
 	memset(dpb->slots, 0, sizeof(dpb->slots));
@@ -446,6 +508,84 @@ int h264_multi_dpb_finish(struct h264_multi_dpb *dpb,
 commit:
 	h264_multi_poc_commit(&dpb->poc_state, config, picture, poc,
 			      has_mmco5);
+	return ret;
+}
+
+void h264_multi_dpb_picture_reset(struct h264_multi_dpb_picture *pic_state)
+{
+	memset(pic_state, 0, sizeof(*pic_state));
+}
+
+static bool
+h264_multi_same_picture(const struct h264_multi_picture *pic_state,
+			const struct h264_multi_picture *next)
+{
+	return pic_state->frame_num == next->frame_num &&
+		pic_state->nal_unit_type == next->nal_unit_type &&
+		!!pic_state->nal_ref_idc == !!next->nal_ref_idc &&
+		pic_state->field_pic == next->field_pic &&
+		pic_state->bottom_field == next->bottom_field &&
+		pic_state->pic_order_cnt_lsb == next->pic_order_cnt_lsb &&
+		pic_state->delta_pic_order_cnt_bottom ==
+			next->delta_pic_order_cnt_bottom &&
+		pic_state->delta_pic_order_cnt[0] == next->delta_pic_order_cnt[0] &&
+		pic_state->delta_pic_order_cnt[1] == next->delta_pic_order_cnt[1];
+}
+
+int h264_multi_dpb_picture_begin(struct h264_multi_dpb *dpb,
+				 const struct h264_multi_config *config,
+				 struct h264_multi_dpb_picture *pic_state,
+				 const struct h264_multi_picture *picture,
+				 u32 buffer_index,
+				 enum h264_multi_slice_action *action)
+{
+	int ret;
+
+	if (!dpb || !config || !pic_state || !picture || !action)
+		return -EINVAL;
+
+	if (!pic_state->active) {
+		if (picture->first_mb_in_slice)
+			return -EINVAL;
+
+		ret = h264_multi_dpb_begin(dpb, config, picture,
+					   &pic_state->poc);
+		if (ret)
+			return ret;
+
+		pic_state->picture = *picture;
+		pic_state->buffer_index = buffer_index;
+		pic_state->active = true;
+		*action = H264_MULTI_SLICE_NEW_PICTURE;
+		return 0;
+	}
+
+	if (!picture->first_mb_in_slice ||
+	    !h264_multi_same_picture(&pic_state->picture, picture))
+		return -EPIPE;
+
+	*action = H264_MULTI_SLICE_CONTINUE;
+	return 0;
+}
+
+int h264_multi_dpb_picture_finish(struct h264_multi_dpb *dpb,
+				  const struct h264_multi_config *config,
+				  struct h264_multi_dpb_picture *pic_state,
+				  const struct h264_multi_marking *marking,
+				  u64 reference_ts)
+{
+	int ret;
+
+	if (!dpb || !config || !pic_state || !marking)
+		return -EINVAL;
+	if (!pic_state->active)
+		return -EPIPE;
+
+	ret = h264_multi_dpb_finish(dpb, config, &pic_state->picture, marking,
+				    &pic_state->poc, reference_ts);
+	if (!ret)
+		h264_multi_dpb_picture_reset(pic_state);
+
 	return ret;
 }
 
