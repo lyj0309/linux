@@ -393,12 +393,8 @@ static int codec_hevc_update_frame_refs(struct amvdec_session *sess,
 	struct codec_hevc *hevc = sess->priv;
 	union rpm_param *params = &hevc->rpm_param;
 	u32 rps_used_bit = hevc->rps_used_bit;
-	int num_ref_idx_l0_active =
-		(params->p.num_ref_idx_l0_active > MAX_REF_ACTIVE) ?
-		MAX_REF_ACTIVE : params->p.num_ref_idx_l0_active;
-	int num_ref_idx_l1_active =
-		(params->p.num_ref_idx_l1_active > MAX_REF_ACTIVE) ?
-		MAX_REF_ACTIVE : params->p.num_ref_idx_l1_active;
+	int num_ref_idx_l0_active = params->p.num_ref_idx_l0_active;
+	int num_ref_idx_l1_active = params->p.num_ref_idx_l1_active;
 	int ref_picset0[MAX_REF_ACTIVE] = { 0 };
 	int ref_picset1[MAX_REF_ACTIVE] = { 0 };
 	u16 *mod_list = params->p.modification_list;
@@ -935,6 +931,73 @@ codec_hevc_get_frame_by_poc(struct codec_hevc *hevc, u32 poc)
 }
 
 static struct hevc_frame *
+codec_hevc_nearest_frame(struct codec_hevc *hevc, u32 poc, bool prefer_past)
+{
+	struct hevc_frame *past = NULL;
+	struct hevc_frame *future = NULL;
+	struct hevc_frame *tmp;
+	u64 past_delta = U64_MAX;
+	u64 future_delta = U64_MAX;
+	s64 target = (s32)poc;
+
+	list_for_each_entry(tmp, &hevc->ref_frames_list, list) {
+		s64 delta;
+
+		if (tmp == hevc->cur_frame)
+			continue;
+
+		delta = (s64)(s32)tmp->poc - target;
+		if (delta < 0 && -delta < past_delta) {
+			past_delta = -delta;
+			past = tmp;
+		} else if (delta > 0 && delta < future_delta) {
+			future_delta = delta;
+			future = tmp;
+		}
+	}
+
+	if (prefer_past)
+		return past ? past : future;
+
+	return future ? future : past;
+}
+
+static void codec_hevc_conceal_missing_refs(struct amvdec_session *sess,
+					    struct hevc_frame *frame)
+{
+	struct codec_hevc *hevc = sess->priv;
+	u32 slice_idx = frame->cur_slice_idx;
+	u32 list_count;
+	u32 list;
+
+	if (frame->cur_slice_type == I_SLICE)
+		return;
+	list_count = frame->cur_slice_type == B_SLICE ? 2 : 1;
+
+	for (list = 0; list < list_count; list++) {
+		u32 *ref_poc_list = frame->ref_poc_list[list][slice_idx];
+		u32 i;
+
+		for (i = 0; i < frame->ref_num[list]; i++) {
+			struct hevc_frame *ref_frame;
+
+			ref_frame = codec_hevc_get_frame_by_poc(hevc, ref_poc_list[i]);
+			if (ref_frame)
+				continue;
+
+			ref_frame = codec_hevc_nearest_frame(hevc, ref_poc_list[i], !list);
+			if (!ref_frame)
+				ref_frame = frame;
+			dev_warn_ratelimited(sess->core->dev,
+					     "Missing L%u reference POC %d, using POC %d\n",
+					     list, (s32)ref_poc_list[i],
+					     (s32)ref_frame->poc);
+			ref_poc_list[i] = ref_frame->poc;
+		}
+	}
+}
+
+static struct hevc_frame *
 codec_hevc_prepare_new_frame(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -1010,9 +1073,10 @@ codec_hevc_set_sao(struct amvdec_session *sess, struct hevc_frame *frame)
 	amvdec_write_dos(core, HEVC_SAO_PIC_SIZE_LCU,
 			 (hevc->lcu_x_num - 1) | (hevc->lcu_y_num - 1) << 16);
 
-	if (codec_hevc_use_downsample(sess->pixfmt_cap, hevc->is_10bit) ||
-	    codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
+	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
 			       hevc->is_10bit))
+		buf_y_paddr = 0;
+	else if (codec_hevc_use_downsample(sess->pixfmt_cap, hevc->is_10bit))
 		buf_y_paddr =
 		     hevc->common.fbc_buffer_paddr[vb->index];
 	else
@@ -1390,11 +1454,8 @@ static void codec_hevc_set_ref_list(struct amvdec_session *sess,
 	for (i = 0; i < ref_num; i++) {
 		ref_frame = codec_hevc_get_frame_by_poc(hevc, ref_poc_list[i]);
 
-		if (!ref_frame) {
-			dev_warn(core->dev, "Couldn't find ref. frame %u\n",
-				 ref_poc_list[i]);
-			continue;
-		}
+		if (!ref_frame)
+			ref_frame = hevc->cur_frame;
 
 		if (codec_hevc_use_fbc(sess->pixfmt_cap, hevc->is_10bit)) {
 			buf_id_y = ref_frame->vbuf->vb2_buf.index;
@@ -1520,6 +1581,8 @@ static int codec_hevc_process_segment_header(struct amvdec_session *sess)
 		return -EINVAL;
 	max_poc_lsb = BIT(param->p.log2_max_pic_order_cnt_lsb_minus4 + 4);
 	if (param->p.slice_type > I_SLICE ||
+	    param->p.num_ref_idx_l0_active > MAX_REF_ACTIVE ||
+	    param->p.num_ref_idx_l1_active > MAX_REF_ACTIVE ||
 	    !hevc->lcu_total || slice_segment_address >= hevc->lcu_total ||
 	    param->p.POClsb >= max_poc_lsb ||
 	    !(param->p.m_temporalId & 0x7) ||
@@ -1549,6 +1612,7 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	union rpm_param *param = &hevc->rpm_param;
 	u32 slice_segment_address = param->p.slice_segment_address;
+	int ret;
 
 	/* First slice: new frame */
 	if (slice_segment_address == 0) {
@@ -1567,13 +1631,19 @@ static int codec_hevc_process_segment(struct amvdec_session *sess)
 
 	if (codec_hevc_update_frame_refs(sess, hevc->cur_frame))
 		return -EINVAL;
+	codec_hevc_conceal_missing_refs(sess, hevc->cur_frame);
 	codec_hevc_update_col_frame(hevc);
 	codec_hevc_update_ldc_flag(hevc);
 	if (codec_hevc_use_mmu(core->platform->revision, sess->pixfmt_cap,
-			       hevc->is_10bit))
-		codec_hevc_fill_mmu_map(sess, &hevc->common,
-					&hevc->cur_frame->vbuf->vb2_buf,
-					hevc->is_10bit);
+			       hevc->is_10bit)) {
+		ret = codec_hevc_fill_mmu_map(sess, &hevc->common,
+					      &hevc->cur_frame->vbuf->vb2_buf,
+					      hevc->is_10bit);
+		if (ret) {
+			dev_err(core->dev, "Failed to build MMU map: %d\n", ret);
+			return ret;
+		}
+	}
 	codec_hevc_set_mc(sess, hevc->cur_frame);
 	codec_hevc_set_mcrcc(sess);
 	codec_hevc_set_mpred(sess, hevc->cur_frame, hevc->col_frame);
@@ -1708,12 +1778,13 @@ static void codec_hevc_fetch_rpm(struct amvdec_session *sess)
 	hevc->max_dec_pic_buffering = raw[RPM_MULTI_DPB_OFFSET];
 }
 
-static void codec_hevc_resume(struct amvdec_session *sess)
+static int codec_hevc_resume(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc = sess->priv;
 	struct amvdec_core *core = sess->core;
 	unsigned long flags;
 	bool active;
+	int ret;
 
 	if (sess->status == STATUS_NEEDS_RESUME)
 		hevc->reset_buffers = true;
@@ -1723,25 +1794,31 @@ static void codec_hevc_resume(struct amvdec_session *sess)
 	spin_unlock_irqrestore(&core->irq_lock, flags);
 	if (!active) {
 		WRITE_ONCE(hevc->resume_pending, true);
-		return;
+		return 0;
 	}
 
 	if (hevc->reset_buffers)
 		codec_hevc_free_fbc_buffers(sess, &hevc->common);
-	if (codec_hevc_setup_buffers(sess, &hevc->common, hevc->is_10bit)) {
+	ret = codec_hevc_setup_buffers(sess, &hevc->common, hevc->is_10bit);
+	if (ret) {
 		amvdec_abort(sess);
-		return;
+		return ret;
 	}
 	hevc->reset_buffers = false;
-	if (codec_hevc_setup_workspace(sess, hevc)) {
+	ret = codec_hevc_setup_workspace(sess, hevc);
+	if (ret) {
 		amvdec_abort(sess);
-		return;
+		return ret;
 	}
 
 	codec_hevc_setup_decode_head(sess, hevc->is_10bit);
-	if (codec_hevc_process_segment_header(sess) ||
-	    codec_hevc_process_segment(sess))
+	ret = codec_hevc_process_segment_header(sess);
+	if (!ret)
+		ret = codec_hevc_process_segment(sess);
+	if (ret)
 		amvdec_abort(sess);
+
+	return ret;
 }
 
 static void codec_hevc_start_cpu(struct amvdec_core *core)
@@ -1758,23 +1835,22 @@ static void codec_hevc_start_cpu(struct amvdec_core *core)
 	amvdec_write_dos(core, HEVC_MPSR, 1);
 }
 
-static void codec_hevc_run(struct amvdec_session *sess)
+static int codec_hevc_run(struct amvdec_session *sess)
 {
 	struct codec_hevc *hevc = sess->priv;
 
 	if (!hevc)
-		return;
+		return 0;
 	if (READ_ONCE(hevc->resume_pending)) {
 		WRITE_ONCE(hevc->resume_pending, false);
-		codec_hevc_resume(sess);
-		return;
+		return codec_hevc_resume(sess);
 	}
 
 	mutex_lock(&hevc->lock);
 	if (!hevc->input_pending) {
 		hevc->waiting_for_input = true;
 		mutex_unlock(&hevc->lock);
-		return;
+		return 0;
 	}
 
 	amvdec_write_dos(sess->core, HEVC_WAIT_FLAG, 0);
@@ -1783,6 +1859,8 @@ static void codec_hevc_run(struct amvdec_session *sess)
 	amvdec_write_dos(sess->core, HEVC_DEC_STATUS_REG, HEVC_ACTION_DONE);
 	codec_hevc_start_cpu(sess->core);
 	mutex_unlock(&hevc->lock);
+
+	return 0;
 }
 
 static void
@@ -1897,8 +1975,8 @@ static irqreturn_t codec_hevc_threaded_isr(struct amvdec_session *sess)
 	}
 	if (ret > 0) {
 		amvdec_src_change(sess, hevc->dst_width, hevc->dst_height,
-					  hevc->dpb_size,
-					  hevc->is_10bit ? 10 : 8);
+				  hevc->dpb_size,
+				  hevc->is_10bit ? 10 : 8);
 		if (sess->status == STATUS_NEEDS_RESUME)
 			yield = true;
 		goto unlock;

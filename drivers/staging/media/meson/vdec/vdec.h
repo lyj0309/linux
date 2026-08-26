@@ -158,6 +158,7 @@ struct amvdec_ops {
  * @release: optional call to release session resources after hardware stop
  * @irq: mailbox interrupt used by the codec firmware
  * @context_switching: the codec can save and restore its hardware context
+ * @canvas_height_align: optional capture canvas height alignment
  * @prepare_firmware: optional call to prepare a complete firmware package
  * @load_extended_firmware: optional call to load additional firmware bits
  * @has_pending_job: optional call if the codec has work that can run without
@@ -179,7 +180,7 @@ struct amvdec_ops {
  */
 struct amvdec_codec_ops {
 	int (*start)(struct amvdec_session *sess);
-	void (*run)(struct amvdec_session *sess);
+	int (*run)(struct amvdec_session *sess);
 	void (*input_queued)(struct amvdec_session *sess, u32 payload_size);
 	bool (*can_queue_input)(struct amvdec_session *sess);
 	bool async_drain;
@@ -187,6 +188,7 @@ struct amvdec_codec_ops {
 	void (*release)(struct amvdec_session *sess);
 	enum amvdec_irq irq;
 	bool context_switching;
+	u32 canvas_height_align;
 	int (*prepare_firmware)(struct amvdec_session *sess,
 				const u8 *data, u32 len);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
@@ -199,7 +201,7 @@ struct amvdec_codec_ops {
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
-	void (*resume)(struct amvdec_session *sess);
+	int (*resume)(struct amvdec_session *sess);
 	const u8 * (*eos_sequence)(u32 *len);
 	irqreturn_t (*isr)(struct amvdec_session *sess);
 	irqreturn_t (*threaded_isr)(struct amvdec_session *sess);
@@ -285,6 +287,9 @@ enum amvdec_status {
  * @vififo_wp: saved VIFIFO write pointer
  * @vififo_rp: saved VIFIFO read pointer
  * @vififo_wrap_count: saved VIFIFO wrap counter
+ * @vififo_swap_vaddr: virtual address for the VIFIFO context save area
+ * @vififo_swap_paddr: physical address for the VIFIFO context save area
+ * @vififo_swap_valid: whether the VIFIFO context save area is valid
  * @vififo_context_valid: whether the saved VIFIFO registers are valid
  * @bufs_recycle: list of buffers that need to be recycled
  * @bufs_recycle_lock: lock for the bufs_recycle list
@@ -346,6 +351,9 @@ struct amvdec_session {
 	u32 vififo_wp;
 	u32 vififo_rp;
 	u32 vififo_wrap_count;
+	void *vififo_swap_vaddr;
+	dma_addr_t vififo_swap_paddr;
+	bool vififo_swap_valid;
 	bool vififo_context_valid;
 
 	struct list_head bufs_recycle;

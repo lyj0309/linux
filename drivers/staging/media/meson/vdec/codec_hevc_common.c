@@ -6,6 +6,8 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
 
+#include <linux/slab.h>
+
 #include "codec_hevc_common.h"
 #include "vdec_helpers.h"
 #include "hevc_regs.h"
@@ -220,6 +222,64 @@ static int codec_hevc_alloc_mmu_headers(struct amvdec_session *sess,
 	return 0;
 }
 
+static void codec_hevc_free_mmu_body(struct device *dev,
+				     struct sg_table *sgt)
+{
+	struct sg_page_iter piter;
+
+	dma_unmap_sgtable(dev, sgt, DMA_BIDIRECTIONAL, 0);
+	for_each_sgtable_page(sgt, &piter, 0)
+		__free_page(sg_page_iter_page(&piter));
+	sg_free_table(sgt);
+	kfree(sgt);
+}
+
+static struct sg_table *codec_hevc_alloc_mmu_body(struct device *dev,
+						  size_t size)
+{
+	unsigned int num_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	struct sg_table *sgt;
+	struct page **pages;
+	unsigned int i;
+	int ret = -ENOMEM;
+
+	pages = kvmalloc_array(num_pages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return ERR_PTR(-ENOMEM);
+
+	for (i = 0; i < num_pages; i++) {
+		pages[i] = alloc_page(GFP_KERNEL | __GFP_NOWARN);
+		if (!pages[i])
+			goto free_pages;
+	}
+
+	sgt = kzalloc_obj(*sgt);
+	if (!sgt)
+		goto free_pages;
+
+	ret = sg_alloc_table_from_pages(sgt, pages, num_pages, 0, size,
+					GFP_KERNEL);
+	if (ret)
+		goto free_sgt;
+
+	ret = dma_map_sgtable(dev, sgt, DMA_BIDIRECTIONAL, 0);
+	if (ret)
+		goto free_table;
+
+	kvfree(pages);
+	return sgt;
+
+free_table:
+	sg_free_table(sgt);
+free_sgt:
+	kfree(sgt);
+free_pages:
+	while (i)
+		__free_page(pages[--i]);
+	kvfree(pages);
+	return ERR_PTR(ret);
+}
+
 void codec_hevc_free_fbc_buffers(struct amvdec_session *sess,
 				 struct codec_hevc_common *comm)
 {
@@ -227,12 +287,17 @@ void codec_hevc_free_fbc_buffers(struct amvdec_session *sess,
 	int i;
 
 	for (i = 0; i < MAX_REF_PIC_NUM; ++i) {
+		if (comm->mmu_body_sgt[i]) {
+			codec_hevc_free_mmu_body(dev, comm->mmu_body_sgt[i]);
+			comm->mmu_body_sgt[i] = NULL;
+		}
 		if (comm->fbc_buffer_vaddr[i]) {
 			dma_free_coherent(dev, comm->fbc_buffer_size,
 					  comm->fbc_buffer_vaddr[i],
 					  comm->fbc_buffer_paddr[i]);
 			comm->fbc_buffer_vaddr[i] = NULL;
 		}
+		comm->fbc_buffer_paddr[i] = 0;
 	}
 	comm->fbc_buffer_size = 0;
 
@@ -249,14 +314,14 @@ void codec_hevc_free_fbc_buffers(struct amvdec_session *sess,
 EXPORT_SYMBOL_GPL(codec_hevc_free_fbc_buffers);
 
 static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
-					struct codec_hevc_common *comm)
+					struct codec_hevc_common *comm,
+					int is_10bit)
 {
 	struct device *dev = sess->core->dev;
 	struct v4l2_m2m_buffer *buf;
 	u32 use_mmu;
 	u32 am21_size;
 	const u32 revision = sess->core->platform->revision;
-	const u32 is_10bit = sess->bitdepth == 10 ? 1 : 0;
 	int ret;
 
 	use_mmu = codec_hevc_use_mmu(revision, sess->pixfmt_cap,
@@ -268,14 +333,26 @@ static int codec_hevc_alloc_fbc_buffers(struct amvdec_session *sess,
 
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		u32 idx = buf->vb.vb2_buf.index;
+		struct sg_table *sgt;
 		dma_addr_t paddr;
+		void *vaddr;
 
-		void *vaddr = dma_alloc_coherent(dev, am21_size, &paddr,
-						 GFP_KERNEL);
-		if (!vaddr) {
-			codec_hevc_free_fbc_buffers(sess, comm);
-			return -ENOMEM;
+		if (use_mmu && comm->mmu_body_sgt[idx])
+			continue;
+		if (!use_mmu && comm->fbc_buffer_vaddr[idx])
+			continue;
+
+		if (use_mmu) {
+			sgt = codec_hevc_alloc_mmu_body(dev, am21_size);
+			if (IS_ERR(sgt))
+				return PTR_ERR(sgt);
+			comm->mmu_body_sgt[idx] = sgt;
+			continue;
 		}
+
+		vaddr = dma_alloc_coherent(dev, am21_size, &paddr, GFP_KERNEL);
+		if (!vaddr)
+			return -ENOMEM;
 
 		comm->fbc_buffer_vaddr[idx] = vaddr;
 		comm->fbc_buffer_paddr[idx] = paddr;
@@ -299,12 +376,24 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 {
 	struct amvdec_core *core = sess->core;
 	struct device *dev = core->dev;
+	u32 use_mmu;
+	u32 fbc_size = 0;
+	bool use_fbc;
 	int ret;
 
-	codec_hevc_free_fbc_buffers(sess, comm);
+	use_mmu = codec_hevc_use_mmu(core->platform->revision,
+				     sess->pixfmt_cap, is_10bit);
+	use_fbc = use_mmu ||
+		  codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit);
+	if (use_fbc)
+		fbc_size = amvdec_amfbc_size(sess->width, sess->height,
+					     is_10bit, use_mmu);
 
-	if (codec_hevc_use_mmu(core->platform->revision,
-			       sess->pixfmt_cap, is_10bit)) {
+	if (comm->fbc_buffer_size != fbc_size ||
+	    !!comm->mmu_map_vaddr != !!use_mmu)
+		codec_hevc_free_fbc_buffers(sess, comm);
+
+	if (use_mmu && !comm->mmu_map_vaddr) {
 		comm->mmu_map_vaddr = dma_alloc_coherent(dev, MMU_MAP_SIZE,
 							 &comm->mmu_map_paddr,
 							 GFP_KERNEL);
@@ -312,10 +401,8 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 			return -ENOMEM;
 	}
 
-	if (codec_hevc_use_mmu(core->platform->revision,
-			       sess->pixfmt_cap, is_10bit) ||
-	    codec_hevc_use_downsample(sess->pixfmt_cap, is_10bit)) {
-		ret = codec_hevc_alloc_fbc_buffers(sess, comm);
+	if (use_fbc) {
+		ret = codec_hevc_alloc_fbc_buffers(sess, comm, is_10bit);
 		if (ret)
 			return ret;
 	}
@@ -326,17 +413,21 @@ int codec_hevc_setup_buffers(struct amvdec_session *sess,
 }
 EXPORT_SYMBOL_GPL(codec_hevc_setup_buffers);
 
-void codec_hevc_fill_mmu_map(struct amvdec_session *sess,
-			     struct codec_hevc_common *comm,
-			     struct vb2_buffer *vb,
-			     u32 is_10bit)
+int codec_hevc_fill_mmu_map(struct amvdec_session *sess,
+			    struct codec_hevc_common *comm,
+			    struct vb2_buffer *vb,
+			    u32 is_10bit)
 {
+	struct sg_dma_page_iter dma_iter;
+	struct sg_table *sgt = comm->mmu_body_sgt[vb->index];
 	u32 use_mmu;
 	u32 size;
 	u32 nb_pages;
 	u32 *mmu_map = comm->mmu_map_vaddr;
-	u32 first_page;
-	u32 i;
+	u32 i = 0;
+
+	if (!sgt || !mmu_map)
+		return -EINVAL;
 
 	use_mmu = codec_hevc_use_mmu(sess->core->platform->revision,
 				     sess->pixfmt_cap, is_10bit);
@@ -344,9 +435,25 @@ void codec_hevc_fill_mmu_map(struct amvdec_session *sess,
 	size = amvdec_amfbc_size(sess->width, sess->height, is_10bit,
 				 use_mmu);
 
-	nb_pages = size / PAGE_SIZE;
-	first_page = comm->fbc_buffer_paddr[vb->index] >> PAGE_SHIFT;
-	for (i = 0; i < nb_pages; ++i)
-		mmu_map[i] = first_page + i;
+	nb_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	if (nb_pages > MMU_MAP_SIZE / sizeof(*mmu_map))
+		return -E2BIG;
+
+	for_each_sgtable_dma_page(sgt, &dma_iter, 0) {
+		dma_addr_t addr;
+
+		if (i == nb_pages)
+			break;
+		addr = sg_page_iter_dma_address(&dma_iter);
+		if ((addr >> PAGE_SHIFT) > U32_MAX)
+			return -ERANGE;
+		mmu_map[i++] = addr >> PAGE_SHIFT;
+	}
+
+	if (i != nb_pages)
+		return -EINVAL;
+
+	dma_wmb();
+	return 0;
 }
 EXPORT_SYMBOL_GPL(codec_hevc_fill_mmu_map);

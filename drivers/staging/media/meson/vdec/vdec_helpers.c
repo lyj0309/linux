@@ -255,8 +255,9 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 {
 	struct v4l2_m2m_buffer *buf;
 	u32 pixfmt = sess->pixfmt_cap;
+	u32 height_align = sess->fmt_out->codec_ops->canvas_height_align ?: 64;
 	u32 width = ALIGN(sess->width, 64);
-	u32 height = ALIGN(sess->height, 64);
+	u32 height = ALIGN(sess->height, height_align);
 	u32 reg_cur;
 	u32 reg_num_cur = 0;
 	u32 reg_base_cur = 0;
@@ -603,18 +604,23 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 
 	/* Keep decoding if the active capture queue can hold the new format. */
 	if (sess->streamon_cap && capture_ready) {
-		sess->fmt_out->codec_ops->resume(sess);
-		return;
+		if (!sess->fmt_out->codec_ops->resume(sess)) {
+			sess->status = STATUS_RUNNING;
+		} else {
+			sess->status = STATUS_NEEDS_RESUME;
+			sess->changed_format = true;
+		}
+	} else {
+		sess->status = STATUS_NEEDS_RESUME;
+		/* A compatible queue may have been allocated before this event. */
+		sess->changed_format = capture_ready;
 	}
 
-	/* A compatible queue may have been allocated before this event. */
-	sess->changed_format = capture_ready;
 	sess->width = width;
 	sess->height = height;
-	sess->status = STATUS_NEEDS_RESUME;
 
-	dev_dbg(sess->core->dev, "Res. changed (%ux%u), DPB size %u\n",
-		width, height, dpb_size);
+	dev_dbg(sess->core->dev, "Res. changed (%ux%u), DPB %u, bitdepth %u\n",
+		width, height, dpb_size, bitdepth);
 	v4l2_event_queue_fh(&sess->fh, &ev);
 }
 EXPORT_SYMBOL_GPL(amvdec_src_change);

@@ -9,6 +9,7 @@
 
 #include <linux/firmware.h>
 #include <linux/clk.h>
+#include <linux/iopoll.h>
 
 #include "vdec_1.h"
 #include "vdec_helpers.h"
@@ -22,6 +23,16 @@
 
 #define MC_SIZE			(4096 * 4)
 #define VDEC_1_QUIESCE_RETRIES	2000
+#define VDEC_1_SWAP_TIMEOUT_US	100000
+
+static int vdec_1_swap_wait(struct amvdec_core *core)
+{
+	u32 value;
+
+	return read_poll_timeout(amvdec_read_dos, value, !(value & BIT(7)),
+				 1, VDEC_1_SWAP_TIMEOUT_US, false, core,
+				 VLD_MEM_SWAP_CTL);
+}
 
 static int
 vdec_1_load_firmware(struct amvdec_session *sess, const char *fwname)
@@ -93,17 +104,43 @@ static int vdec_1_stbuf_power_up(struct amvdec_session *sess)
 	u32 rp = sess->vififo_paddr;
 	u32 wp = sess->vififo_paddr;
 	u32 wrap_count = 0;
+	int ret;
+
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
+	if (sess->vififo_context_valid && sess->vififo_swap_valid) {
+		amvdec_write_dos_bits(core, POWER_CTL_VLD, BIT(9));
+		amvdec_write_dos(core, VLD_MEM_SWAP_ADDR,
+				 sess->vififo_swap_paddr);
+		amvdec_write_dos(core, VLD_MEM_SWAP_CTL, 1);
+		ret = vdec_1_swap_wait(core);
+		amvdec_write_dos(core, VLD_MEM_SWAP_CTL, 0);
+		amvdec_read_dos(core, VLD_MEM_SWAP_CTL);
+		if (ret) {
+			dev_warn(core->dev, "VIFIFO context restore timed out\n");
+			sess->vififo_swap_valid = false;
+			sess->vififo_context_valid = false;
+			return ret;
+		}
+
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT,
+				 sess->vififo_wrap_count);
+		amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL,
+				      (0x11 << MEM_FIFO_CNT_BIT) |
+				      MEM_FILL_ON_LEVEL |
+				      MEM_CTRL_FILL_EN |
+				      MEM_CTRL_EMPTY_EN);
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
+		return 0;
+	}
 
 	if (sess->vififo_context_valid) {
 		curr = sess->vififo_curr;
-		wp = sess->vififo_wp;
 		rp = sess->vififo_rp;
+		wp = sess->vififo_wp;
 		wrap_count = sess->vififo_wrap_count;
 	}
-
-	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT, wrap_count);
-	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR, sess->vififo_paddr);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, curr);
@@ -174,10 +211,23 @@ static void vdec_1_quiesce(struct amvdec_session *sess)
 	dev_warn(core->dev, "VIFIFO read pointer did not become stable\n");
 }
 
-static void vdec_1_save_stbuf_context(struct amvdec_session *sess)
+static int vdec_1_save_stbuf_context(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	u32 curr, wp, rp;
+	int ret;
+
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, BIT(15));
+	amvdec_write_dos(core, VLD_MEM_SWAP_ADDR, sess->vififo_swap_paddr);
+	amvdec_write_dos(core, VLD_MEM_SWAP_CTL, 3);
+	ret = vdec_1_swap_wait(core);
+	amvdec_write_dos(core, VLD_MEM_SWAP_CTL, 0);
+	amvdec_read_dos(core, VLD_MEM_SWAP_CTL);
+	if (ret) {
+		dev_warn(core->dev, "VIFIFO context save timed out\n");
+		sess->vififo_context_valid = false;
+		return ret;
+	}
 
 	curr = amvdec_read_dos(core, VLD_MEM_VIFIFO_CURR_PTR);
 	wp = amvdec_read_dos(core, VLD_MEM_VIFIFO_WP);
@@ -188,7 +238,7 @@ static void vdec_1_save_stbuf_context(struct amvdec_session *sess)
 	    !vdec_1_stbuf_pointer_valid(sess, rp)) {
 		dev_warn(core->dev, "invalid VIFIFO context pointers\n");
 		sess->vififo_context_valid = false;
-		return;
+		return -EINVAL;
 	}
 
 	sess->vififo_curr = curr;
@@ -196,10 +246,13 @@ static void vdec_1_save_stbuf_context(struct amvdec_session *sess)
 	sess->vififo_rp = rp;
 	sess->vififo_wrap_count =
 		amvdec_read_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT);
+	sess->vififo_swap_valid = true;
 	sess->vififo_context_valid = true;
+
+	return 0;
 }
 
-static void __vdec_1_stop(struct amvdec_session *sess)
+static void vdec_1_suspend(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
@@ -215,6 +268,11 @@ static void __vdec_1_stop(struct amvdec_session *sess)
 	amvdec_write_dos(core, MPSR, 0);
 	amvdec_write_dos(core, CPSR, 0);
 	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 0);
+}
+
+static void vdec_1_power_off(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
 
 	amvdec_write_dos(core, DOS_SW_RESET0, BIT(12) | BIT(11));
 	amvdec_write_dos(core, DOS_SW_RESET0, 0);
@@ -242,55 +300,42 @@ static int vdec_1_stop(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 
-	__vdec_1_stop(sess);
+	vdec_1_suspend(sess);
+	vdec_1_power_off(sess);
 
 	clk_disable_unprepare(core->vdec_1_clk);
 
 	return 0;
 }
 
-static int vdec_1_start(struct amvdec_session *sess)
+static int vdec_1_resume(struct amvdec_session *sess)
 {
-	int ret;
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	int ret;
 
-	/* Configure the vdec clk to the maximum available */
-	clk_set_rate(core->vdec_1_clk, 666666666);
-	ret = clk_prepare_enable(core->vdec_1_clk);
-	if (ret)
-		return ret;
-
-	/* Enable power for VDEC_1 */
-	if (core->platform->revision == VDEC_REVISION_SM1)
-		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
-				   GEN_PWR_VDEC_1_SM1, 0);
-	else
-		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
-				   GEN_PWR_VDEC_1, 0);
-	usleep_range(10, 20);
-
-	/* Reset VDEC1 */
-	amvdec_write_dos(core, DOS_SW_RESET0, 0xfffffffc);
+	/*
+	 * A restorable VIFIFO context only needs the firmware processors reset.
+	 * New and explicitly rewound contexts need clean decoder state too.
+	 */
+	amvdec_write_dos(core, DOS_SW_RESET0,
+			 sess->vififo_context_valid && sess->vififo_swap_valid ?
+			 BIT(12) | BIT(11) :
+			 0xfffffffc);
 	amvdec_write_dos(core, DOS_SW_RESET0, 0x00000000);
+	amvdec_read_dos(core, DOS_SW_RESET0);
 
 	amvdec_write_dos(core, DOS_GCLK_EN0, 0x3ff);
 
-	/* enable VDEC Memories */
-	amvdec_write_dos(core, DOS_MEM_PD_VDEC, 0);
-	/* Remove VDEC1 Isolation */
-	if (core->platform->revision == VDEC_REVISION_SM1)
-		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_ISO0,
-				   GEN_PWR_VDEC_1_SM1, 0);
-	else
-		regmap_write(core->regmap_ao, AO_RTI_GEN_PWR_ISO0, 0);
 	/* Reset DOS top registers */
 	amvdec_write_dos(core, DOS_VDEC_MCRCC_STALL_CTRL, 0);
 
 	amvdec_write_dos(core, GCLK_EN, 0x3ff);
 	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
 
-	vdec_1_stbuf_power_up(sess);
+	ret = vdec_1_stbuf_power_up(sess);
+	if (ret)
+		goto stop;
 
 	ret = vdec_1_load_firmware(sess, sess->fmt_out->firmware_path);
 	if (ret)
@@ -319,7 +364,48 @@ static int vdec_1_start(struct amvdec_session *sess)
 	return 0;
 
 stop:
-	__vdec_1_stop(sess);
+	amvdec_write_dos(core, MPSR, 0);
+	amvdec_write_dos(core, CPSR, 0);
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 0);
+	if (sess->priv)
+		codec_ops->stop(sess);
+	return ret;
+}
+
+static int vdec_1_start(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	int ret;
+
+	/* Configure the vdec clk to the maximum available */
+	clk_set_rate(core->vdec_1_clk, 666666666);
+	ret = clk_prepare_enable(core->vdec_1_clk);
+	if (ret)
+		return ret;
+
+	/* Enable power for VDEC_1 */
+	if (core->platform->revision == VDEC_REVISION_SM1)
+		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
+				   GEN_PWR_VDEC_1_SM1, 0);
+	else
+		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
+				   GEN_PWR_VDEC_1, 0);
+	usleep_range(10, 20);
+
+	/* enable VDEC Memories */
+	amvdec_write_dos(core, DOS_MEM_PD_VDEC, 0);
+	/* Remove VDEC1 Isolation */
+	if (core->platform->revision == VDEC_REVISION_SM1)
+		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_ISO0,
+				   GEN_PWR_VDEC_1_SM1, 0);
+	else
+		regmap_write(core->regmap_ao, AO_RTI_GEN_PWR_ISO0, 0);
+
+	ret = vdec_1_resume(sess);
+	if (!ret)
+		return 0;
+
+	vdec_1_power_off(sess);
 	clk_disable_unprepare(core->vdec_1_clk);
 	return ret;
 }
@@ -327,6 +413,8 @@ stop:
 struct amvdec_ops vdec_1_ops = {
 	.start = vdec_1_start,
 	.stop = vdec_1_stop,
+	.resume = vdec_1_resume,
+	.suspend = vdec_1_suspend,
 	.conf_esparser = vdec_1_conf_esparser,
 	.vififo_level = vdec_1_vififo_level,
 };
