@@ -9,3 +9,13 @@ config VIDEO_MESON_VDEC
 	select MESON_CANVAS
 	help
 	Support for the video decoder found in gxbb/gxl/gxm chips.
+
+config VIDEO_MESON_VDEC_KUNIT_TEST
+	bool "KUnit tests for the Amlogic video decoder" if !KUNIT_ALL_TESTS
+	depends on VIDEO_MESON_VDEC && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Build unit tests for the protocol and state handling used by the
+	  Amlogic video decoder. The tests cover H.264 picture order count,
+	  decoded picture buffer management and reference list construction.
+	  This option is intended for kernel developers.

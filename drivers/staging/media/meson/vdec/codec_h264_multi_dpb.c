@@ -2,6 +2,8 @@
 
 #include <linux/string.h>
 
+#include <media/v4l2-h264.h>
+
 #include "codec_h264_multi_dpb.h"
 
 void h264_multi_poc_reset(struct h264_multi_poc_state *state)
@@ -189,5 +191,289 @@ void h264_multi_poc_commit(struct h264_multi_poc_state *state,
 				poc->top - min(poc->top, poc->bottom);
 	} else {
 		state->prev_top_field_order_cnt = poc->top;
+	}
+}
+
+void h264_multi_dpb_reset(struct h264_multi_dpb *dpb)
+{
+	memset(dpb, 0, sizeof(*dpb));
+	h264_multi_poc_reset(&dpb->poc_state);
+	dpb->max_long_term_frame_idx = -1;
+	dpb->current_long_term_frame_idx = -1;
+}
+
+static void h264_multi_dpb_clear_refs(struct h264_multi_dpb *dpb)
+{
+	memset(dpb->slots, 0, sizeof(dpb->slots));
+}
+
+static s32 h264_multi_dpb_pic_num(const struct h264_multi_dpb_slot *slot,
+				  const struct h264_multi_config *config,
+				  const struct h264_multi_picture *picture)
+{
+	if (slot->long_term)
+		return slot->long_term_frame_idx;
+	if (slot->frame_num > picture->frame_num)
+		return (s32)slot->frame_num - config->max_frame_num;
+
+	return slot->frame_num;
+}
+
+static int h264_multi_dpb_find_pic_num(struct h264_multi_dpb *dpb,
+				       const struct h264_multi_config *config,
+				       const struct h264_multi_picture *picture,
+				       s32 pic_num)
+{
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (dpb->slots[i].active && !dpb->slots[i].long_term &&
+		    h264_multi_dpb_pic_num(&dpb->slots[i], config, picture) ==
+		    pic_num)
+			return i;
+	}
+
+	return -ENOENT;
+}
+
+static int h264_multi_dpb_find_long_term(struct h264_multi_dpb *dpb,
+					 u16 long_term_frame_idx)
+{
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (dpb->slots[i].active && dpb->slots[i].long_term &&
+		    dpb->slots[i].long_term_frame_idx == long_term_frame_idx)
+			return i;
+	}
+
+	return -ENOENT;
+}
+
+static void h264_multi_dpb_unmark_long_term(struct h264_multi_dpb *dpb,
+					    u16 long_term_frame_idx)
+{
+	int slot = h264_multi_dpb_find_long_term(dpb, long_term_frame_idx);
+
+	if (slot >= 0)
+		memset(&dpb->slots[slot], 0, sizeof(dpb->slots[slot]));
+}
+
+static void
+h264_multi_dpb_sliding_window(struct h264_multi_dpb *dpb,
+			      const struct h264_multi_config *config,
+			      const struct h264_multi_picture *picture)
+{
+	s32 lowest_pic_num = S32_MAX;
+	unsigned int refs = 0;
+	int oldest = -1;
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		s32 pic_num;
+
+		if (!dpb->slots[i].active)
+			continue;
+		refs++;
+		if (dpb->slots[i].long_term)
+			continue;
+		pic_num = h264_multi_dpb_pic_num(&dpb->slots[i], config,
+						 picture);
+		if (pic_num < lowest_pic_num) {
+			lowest_pic_num = pic_num;
+			oldest = i;
+		}
+	}
+
+	if (refs >= config->max_refs && oldest >= 0)
+		memset(&dpb->slots[oldest], 0, sizeof(dpb->slots[oldest]));
+}
+
+static int h264_multi_dpb_apply_mmco(struct h264_multi_dpb *dpb,
+				     const struct h264_multi_config *config,
+				     const struct h264_multi_picture *picture,
+				     const struct h264_multi_marking *marking,
+				     bool *has_mmco5)
+{
+	s32 current_pic_num = picture->frame_num;
+	unsigned int i;
+
+	for (i = 0; i < marking->count; i++) {
+		const struct h264_multi_mmco *op = &marking->ops[i];
+		int slot;
+
+		switch (op->opcode) {
+		case 1:
+			slot = h264_multi_dpb_find_pic_num(dpb, config, picture,
+							   current_pic_num -
+				(op->difference_of_pic_nums_minus1 + 1));
+			if (slot >= 0)
+				memset(&dpb->slots[slot], 0,
+				       sizeof(dpb->slots[slot]));
+			break;
+		case 2:
+			h264_multi_dpb_unmark_long_term(dpb,
+							op->long_term_pic_num);
+			break;
+		case 3:
+			h264_multi_dpb_unmark_long_term(dpb,
+							op->long_term_frame_idx);
+			slot = h264_multi_dpb_find_pic_num(dpb, config, picture,
+							   current_pic_num -
+				(op->difference_of_pic_nums_minus1 + 1));
+			if (slot >= 0) {
+				dpb->slots[slot].long_term = true;
+				dpb->slots[slot].long_term_frame_idx =
+					op->long_term_frame_idx;
+			}
+			break;
+		case 4:
+			dpb->max_long_term_frame_idx =
+				op->max_long_term_frame_idx_plus1 - 1;
+			for (slot = 0; slot < H264_MULTI_DPB_SIZE; slot++) {
+				if (dpb->slots[slot].active &&
+				    dpb->slots[slot].long_term &&
+				    dpb->slots[slot].long_term_frame_idx >
+				    dpb->max_long_term_frame_idx)
+					memset(&dpb->slots[slot], 0,
+					       sizeof(dpb->slots[slot]));
+			}
+			break;
+		case 5:
+			h264_multi_dpb_clear_refs(dpb);
+			dpb->max_long_term_frame_idx = -1;
+			*has_mmco5 = true;
+			break;
+		case 6:
+			h264_multi_dpb_unmark_long_term(dpb,
+							op->long_term_frame_idx);
+			dpb->current_long_term_frame_idx =
+				op->long_term_frame_idx;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int h264_multi_dpb_store_current(struct h264_multi_dpb *dpb,
+					const struct h264_multi_picture *picture,
+					const struct h264_multi_poc *poc,
+					u64 reference_ts,
+					bool has_mmco5)
+{
+	struct h264_multi_dpb_slot *slot;
+	unsigned int i;
+
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		if (!dpb->slots[i].active)
+			break;
+	}
+	if (i == H264_MULTI_DPB_SIZE)
+		return -ENOSPC;
+
+	slot = &dpb->slots[i];
+	slot->active = true;
+	slot->reference_ts = reference_ts;
+	slot->frame_num = has_mmco5 ? 0 : picture->frame_num;
+	slot->top_field_order_cnt = poc->top;
+	slot->bottom_field_order_cnt = poc->bottom;
+	slot->fields = V4L2_H264_FRAME_REF;
+	if (dpb->current_long_term_frame_idx >= 0) {
+		slot->long_term = true;
+		slot->long_term_frame_idx = dpb->current_long_term_frame_idx;
+	}
+
+	return 0;
+}
+
+int h264_multi_dpb_begin(struct h264_multi_dpb *dpb,
+			 const struct h264_multi_config *config,
+			 const struct h264_multi_picture *picture,
+			 struct h264_multi_poc *poc)
+{
+	int ret;
+
+	if (picture->field_pic)
+		return -EOPNOTSUPP;
+	ret = h264_multi_poc_derive(&dpb->poc_state, config, picture, poc);
+	if (ret)
+		return ret;
+	if (picture->nal_unit_type == 5) {
+		h264_multi_dpb_clear_refs(dpb);
+		dpb->max_long_term_frame_idx = -1;
+	}
+	dpb->current_long_term_frame_idx = -1;
+
+	return 0;
+}
+
+int h264_multi_dpb_finish(struct h264_multi_dpb *dpb,
+			  const struct h264_multi_config *config,
+			  const struct h264_multi_picture *picture,
+			  const struct h264_multi_marking *marking,
+			  const struct h264_multi_poc *poc,
+			  u64 reference_ts)
+{
+	bool has_mmco5 = false;
+	int ret = 0;
+
+	if (!picture->nal_ref_idc)
+		goto commit;
+
+	if (picture->nal_unit_type == 5) {
+		if (marking->long_term_reference) {
+			dpb->max_long_term_frame_idx = 0;
+			dpb->current_long_term_frame_idx = 0;
+		}
+	} else if (marking->adaptive) {
+		ret = h264_multi_dpb_apply_mmco(dpb, config, picture, marking,
+						&has_mmco5);
+		if (ret)
+			return ret;
+	} else if (!config->max_refs) {
+		goto commit;
+	} else {
+		h264_multi_dpb_sliding_window(dpb, config, picture);
+	}
+
+	ret = h264_multi_dpb_store_current(dpb, picture, poc, reference_ts,
+					   has_mmco5);
+	if (ret)
+		return ret;
+commit:
+	h264_multi_poc_commit(&dpb->poc_state, config, picture, poc,
+			      has_mmco5);
+	return ret;
+}
+
+void h264_multi_dpb_to_v4l2(const struct h264_multi_dpb *dpb,
+			    const struct h264_multi_config *config,
+			    const struct h264_multi_picture *picture,
+			    struct v4l2_h264_dpb_entry *entries)
+{
+	unsigned int i;
+
+	memset(entries, 0, sizeof(*entries) * H264_MULTI_DPB_SIZE);
+	for (i = 0; i < H264_MULTI_DPB_SIZE; i++) {
+		const struct h264_multi_dpb_slot *slot = &dpb->slots[i];
+
+		if (!slot->active)
+			continue;
+		entries[i].reference_ts = slot->reference_ts;
+		entries[i].frame_num = slot->long_term ?
+			slot->long_term_frame_idx : slot->frame_num;
+		entries[i].pic_num = h264_multi_dpb_pic_num(slot, config,
+							    picture);
+		entries[i].top_field_order_cnt = slot->top_field_order_cnt;
+		entries[i].bottom_field_order_cnt =
+			slot->bottom_field_order_cnt;
+		entries[i].fields = slot->fields;
+		entries[i].flags = V4L2_H264_DPB_ENTRY_FLAG_VALID |
+			V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+		if (slot->long_term)
+			entries[i].flags |= V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM;
 	}
 }
