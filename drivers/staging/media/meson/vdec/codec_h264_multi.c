@@ -3,7 +3,10 @@
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
 
+#include "vdec_helpers.h"
+#include "dos_regs.h"
 #include "codec_h264_multi.h"
+#include "codec_h264_multi_dpb.h"
 #include "codec_h264_multi_lmem.h"
 
 #define H264_MULTI_FW_PAGES	7
@@ -12,6 +15,7 @@
 #define H264_MULTI_FW_SIZE	(H264_MULTI_FW_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_SWAP_SIZE	(H264_MULTI_SWAP_PAGES * H264_MULTI_PAGE_SIZE)
 #define H264_MULTI_LMEM_WORDS	(PAGE_SIZE / sizeof(u16))
+#define H264_MULTI_WORKSPACE_SIZE	(ALIGN((SZ_2M + SZ_32K + SZ_128K + 128), PAGE_SIZE))
 
 #define H264_MULTI_MB_WIDTH_MASK		GENMASK(7, 0)
 #define H264_MULTI_MB_TOTAL_MASK		GENMASK(23, 8)
@@ -20,6 +24,17 @@
 #define H264_MULTI_MAX_REFS_MASK		GENMASK(15, 8)
 #define H264_MULTI_SPS_BITSTREAM_RESTRICTION	BIT(3)
 #define H264_MULTI_MAX_DPB_SIZE		16
+#define H264_MULTI_DCAC_READ_MARGIN	SZ_64K
+
+#define H264_MULTI_INIT_FLAG		AV_SCRATCH_2
+#define H264_MULTI_HEAD_PADDING		AV_SCRATCH_3
+#define H264_MULTI_DECODE_MODE		AV_SCRATCH_4
+#define H264_MULTI_DECODE_SEQINFO	AV_SCRATCH_5
+#define H264_MULTI_FRAME_COUNTER		AV_SCRATCH_I
+#define H264_MULTI_DPB_STATUS		AV_SCRATCH_J
+#define H264_MULTI_LMEM_ADDR		AV_SCRATCH_L
+
+#define H264_MULTI_DECODE_MODE_STREAM	2
 
 enum h264_multi_fw_page {
 	H264_MULTI_FW_MAIN_0,
@@ -48,6 +63,17 @@ struct codec_h264_multi {
 	dma_addr_t fw_swap_paddr;
 	void *lmem_vaddr;
 	dma_addr_t lmem_paddr;
+	void *workspace_vaddr;
+	dma_addr_t workspace_paddr;
+	struct h264_multi_dpb dpb;
+	u32 scratch_f;
+	u32 iqidct_control;
+	u32 vcop_control;
+	u32 vld_decode_control;
+	u32 frame_counter;
+	u32 decode_seqinfo;
+	bool context_valid;
+	bool resume_pending;
 	union {
 		u16 words[H264_MULTI_LMEM_WORDS];
 		struct h264_multi_lmem data;
@@ -92,6 +118,8 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 
 	if (len < H264_MULTI_FW_SIZE)
 		return -EINVAL;
+	if (sess->priv)
+		return 0;
 
 	h264 = kzalloc_obj(*h264);
 	if (!h264)
@@ -108,13 +136,24 @@ int codec_h264_multi_prepare_firmware(struct amvdec_session *sess,
 					      &h264->lmem_paddr, GFP_KERNEL);
 	if (!h264->lmem_vaddr)
 		goto free_swap;
+	h264->workspace_vaddr = dma_alloc_coherent(core->dev,
+						   H264_MULTI_WORKSPACE_SIZE,
+						   &h264->workspace_paddr,
+						   GFP_KERNEL);
+	if (!h264->workspace_vaddr)
+		goto free_lmem;
 
 	h264_multi_build_swap_image(h264->fw_swap_vaddr, data);
 	memset(h264->lmem_vaddr, 0, PAGE_SIZE);
+	memset(h264->workspace_vaddr, 0, H264_MULTI_WORKSPACE_SIZE);
+	h264_multi_dpb_reset(&h264->dpb);
 	sess->priv = h264;
 
 	return 0;
 
+free_lmem:
+	dma_free_coherent(core->dev, PAGE_SIZE,
+			  h264->lmem_vaddr, h264->lmem_paddr);
 free_swap:
 	dma_free_coherent(core->dev, H264_MULTI_SWAP_SIZE,
 			  h264->fw_swap_vaddr, h264->fw_swap_paddr);
@@ -131,6 +170,8 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 	if (!h264)
 		return;
 
+	dma_free_coherent(core->dev, H264_MULTI_WORKSPACE_SIZE,
+			  h264->workspace_vaddr, h264->workspace_paddr);
 	dma_free_coherent(core->dev, PAGE_SIZE,
 			  h264->lmem_vaddr, h264->lmem_paddr);
 	dma_free_coherent(core->dev, H264_MULTI_SWAP_SIZE,
@@ -138,6 +179,139 @@ void codec_h264_multi_release_firmware(struct amvdec_session *sess)
 	kfree(h264);
 	sess->priv = NULL;
 }
+
+static int codec_h264_multi_start(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+
+	if (!h264)
+		return -EINVAL;
+
+	amvdec_write_dos_bits(core, POWER_CTL_VLD, BIT(9) | BIT(6));
+	amvdec_write_dos(core, PSCALE_CTRL, 0);
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_MUX_CTRL, BIT(31));
+	amvdec_write_dos(core, MDEC_EXTIF_CFG1, 0);
+	amvdec_write_dos(core, MDEC_PIC_DC_THRESH, 0x404038aa);
+
+	amvdec_write_dos(core, AV_SCRATCH_8,
+			 h264->workspace_paddr + H264_MULTI_DCAC_READ_MARGIN);
+	amvdec_write_dos(core, AV_SCRATCH_G, h264->fw_swap_paddr);
+	amvdec_write_dos(core, H264_MULTI_LMEM_ADDR, h264->lmem_paddr);
+	amvdec_write_dos(core, AV_SCRATCH_F,
+			 (h264->scratch_f & 0xffffffc3) | BIT(4));
+
+	if (h264->context_valid) {
+		amvdec_write_dos(core, IQIDCT_CONTROL, h264->iqidct_control);
+		amvdec_write_dos(core, VCOP_CTRL_REG, h264->vcop_control);
+		amvdec_write_dos(core, VLD_DECODE_CONTROL,
+				 h264->vld_decode_control);
+	}
+
+	amvdec_write_dos(core, H264_MULTI_DECODE_MODE,
+			 H264_MULTI_DECODE_MODE_STREAM);
+	amvdec_write_dos(core, H264_MULTI_DECODE_SEQINFO,
+			 h264->decode_seqinfo);
+	amvdec_write_dos(core, H264_MULTI_HEAD_PADDING, 0);
+	amvdec_write_dos(core, H264_MULTI_INIT_FLAG,
+			 h264->context_valid);
+	amvdec_write_dos(core, H264_MULTI_FRAME_COUNTER, h264->frame_counter);
+	if (h264->resume_pending) {
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_ACTION_CONFIG_DONE);
+		h264->resume_pending = false;
+	} else {
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 h264->context_valid ?
+				 H264_MULTI_ACTION_DECODE_START : 0);
+	}
+
+	return 0;
+}
+
+static int codec_h264_multi_stop(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+
+	if (!h264)
+		return 0;
+
+	h264->scratch_f = amvdec_read_dos(core, AV_SCRATCH_F);
+	h264->iqidct_control = amvdec_read_dos(core, IQIDCT_CONTROL);
+	h264->vcop_control = amvdec_read_dos(core, VCOP_CTRL_REG);
+	h264->vld_decode_control = amvdec_read_dos(core, VLD_DECODE_CONTROL);
+	h264->frame_counter = amvdec_read_dos(core, H264_MULTI_FRAME_COUNTER);
+
+	return 0;
+}
+
+static void codec_h264_multi_resume(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	struct amvdec_core *core = sess->core;
+	unsigned long flags;
+	bool active;
+
+	if (!h264)
+		return;
+
+	spin_lock_irqsave(&core->irq_lock, flags);
+	active = core->cur_sess == sess;
+	spin_unlock_irqrestore(&core->irq_lock, flags);
+
+	if (active)
+		amvdec_write_dos(core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_ACTION_CONFIG_DONE);
+	else
+		h264->resume_pending = true;
+}
+
+static irqreturn_t codec_h264_multi_isr(struct amvdec_session *sess)
+{
+	amvdec_write_dos(sess->core, ASSIST_MBOX1_CLR_REG, 1);
+
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t codec_h264_multi_threaded_isr(struct amvdec_session *sess)
+{
+	struct codec_h264_multi *h264 = sess->priv;
+	u32 status = amvdec_read_dos(sess->core, H264_MULTI_DPB_STATUS);
+
+	if (!h264)
+		return IRQ_NONE;
+
+	if (status == H264_MULTI_WRRSP_REQUEST) {
+		amvdec_write_dos(sess->core, H264_MULTI_DPB_STATUS,
+				 H264_MULTI_WRRSP_DONE);
+		return IRQ_HANDLED;
+	}
+
+	if (status == H264_MULTI_CONFIG_REQUEST ||
+	    status == H264_MULTI_SLICE_HEAD_DONE ||
+	    status == H264_MULTI_PIC_DATA_DONE) {
+		if (codec_h264_multi_read_lmem(sess))
+			return IRQ_NONE;
+		h264->context_valid = true;
+	}
+
+	if (status == H264_MULTI_PIC_DATA_DONE)
+		amvdec_m2m_job_yield(sess);
+
+	return IRQ_HANDLED;
+}
+
+struct amvdec_codec_ops codec_h264_multi_ops = {
+	.start = codec_h264_multi_start,
+	.stop = codec_h264_multi_stop,
+	.release = codec_h264_multi_release_firmware,
+	.context_switching = true,
+	.prepare_firmware = codec_h264_multi_prepare_firmware,
+	.resume = codec_h264_multi_resume,
+	.isr = codec_h264_multi_isr,
+	.threaded_isr = codec_h264_multi_threaded_isr,
+};
 
 int codec_h264_multi_read_lmem(struct amvdec_session *sess)
 {

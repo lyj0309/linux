@@ -91,6 +91,7 @@ static int vdec_poweron(struct amvdec_session *sess)
 {
 	int ret;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
 	ret = clk_prepare_enable(sess->core->dos_parser_clk);
 	if (ret)
@@ -101,8 +102,11 @@ static int vdec_poweron(struct amvdec_session *sess)
 		goto disable_dos_parser;
 
 	ret = vdec_ops->start(sess);
-	if (ret)
+	if (ret) {
+		if (codec_ops->release && sess->priv)
+			codec_ops->release(sess);
 		goto disable_dos;
+	}
 
 	esparser_power_up(sess);
 
@@ -135,6 +139,15 @@ static void vdec_poweroff(struct amvdec_session *sess)
 		codec_ops->drain(sess);
 
 	vdec_ops->stop(sess);
+	if (codec_ops->release && sess->priv)
+		codec_ops->release(sess);
+	clk_disable_unprepare(sess->core->dos_clk);
+	clk_disable_unprepare(sess->core->dos_parser_clk);
+}
+
+static void vdec_suspend(struct amvdec_session *sess)
+{
+	sess->fmt_out->vdec_ops->stop(sess);
 	clk_disable_unprepare(sess->core->dos_clk);
 	clk_disable_unprepare(sess->core->dos_parser_clk);
 }
@@ -162,12 +175,76 @@ static void vdec_m2m_device_run(void *priv)
 	schedule_work(&sess->esparser_queue_work);
 }
 
-void amvdec_m2m_job_finish(struct amvdec_session *sess)
+int amvdec_m2m_job_start(struct amvdec_session *sess)
+{
+	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	struct amvdec_core *core = sess->core;
+	int ret = 0;
+
+	if (!codec_ops->context_switching)
+		return 0;
+
+	disable_irq(core->vdec_irq);
+	mutex_lock(&core->hw_lock);
+	if (core->cur_sess == sess)
+		goto unlock;
+	if (core->cur_sess) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	vdec_set_current_session(core, sess);
+	ret = vdec_poweron(sess);
+	if (ret) {
+		vdec_set_current_session(core, NULL);
+		goto unlock;
+	}
+
+unlock:
+	mutex_unlock(&core->hw_lock);
+	enable_irq(core->vdec_irq);
+	return ret;
+}
+
+static void vdec_m2m_release_hardware(struct amvdec_session *sess,
+				      bool synchronize)
+{
+	struct amvdec_core *core = sess->core;
+
+	if (synchronize)
+		disable_irq(core->vdec_irq);
+
+	mutex_lock(&core->hw_lock);
+	if (core->cur_sess == sess) {
+		vdec_suspend(sess);
+		vdec_set_current_session(core, NULL);
+	}
+	mutex_unlock(&core->hw_lock);
+
+	if (synchronize)
+		enable_irq(core->vdec_irq);
+}
+
+static void vdec_m2m_complete_job(struct amvdec_session *sess,
+				  bool synchronize)
 {
 	if (atomic_cmpxchg(&sess->m2m_job_running, 1, 0) != 1)
 		return;
 
+	if (sess->fmt_out->codec_ops->context_switching)
+		vdec_m2m_release_hardware(sess, synchronize);
+
 	v4l2_m2m_job_finish(sess->core->m2m_dev, sess->m2m_ctx);
+}
+
+void amvdec_m2m_job_finish(struct amvdec_session *sess)
+{
+	vdec_m2m_complete_job(sess, true);
+}
+
+void amvdec_m2m_job_yield(struct amvdec_session *sess)
+{
+	vdec_m2m_complete_job(sess, false);
 }
 
 void amvdec_m2m_retry_job(struct amvdec_session *sess)
@@ -331,11 +408,6 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 
 	mutex_lock(&core->hw_lock);
 
-	if (core->cur_sess && core->cur_sess != sess) {
-		ret = -EBUSY;
-		goto bufs_done;
-	}
-
 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		sess->streamon_out = 1;
 	else
@@ -356,6 +428,17 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	    sess->status == STATUS_NEEDS_RESUME ||
 	    sess->status == STATUS_INIT)
 		goto unlock_ok;
+
+	if (codec_ops->context_switching) {
+		if (core->exclusive_sess) {
+			ret = -EBUSY;
+			goto bufs_done;
+		}
+	} else if (core->exclusive_sess ||
+		   core->context_switching_sessions) {
+		ret = -EBUSY;
+		goto bufs_done;
+	}
 
 	sess->vififo_size = SIZE_VIFIFO;
 	sess->vififo_vaddr =
@@ -379,25 +462,33 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	sess->sequence_cap = 0;
 	sess->sequence_out = 0;
 	sess->status = STATUS_INIT;
-	disable_irq(core->vdec_irq);
-	vdec_set_current_session(core, sess);
+	if (!codec_ops->context_switching) {
+		disable_irq(core->vdec_irq);
+		vdec_set_current_session(core, sess);
 
-	ret = vdec_poweron(sess);
-	if (ret) {
-		vdec_set_current_session(core, NULL);
+		ret = vdec_poweron(sess);
+		if (ret) {
+			vdec_set_current_session(core, NULL);
+			enable_irq(core->vdec_irq);
+			sess->status = STATUS_STOPPED;
+			goto vififo_free;
+		}
 		enable_irq(core->vdec_irq);
-		sess->status = STATUS_STOPPED;
-		goto vififo_free;
 	}
-	enable_irq(core->vdec_irq);
 
 	if (vdec_codec_needs_recycle(sess))
 		sess->recycle_thread = kthread_run(vdec_recycle_thread, sess,
 						   "vdec_recycle");
 
+	if (codec_ops->context_switching)
+		core->context_switching_sessions++;
+	else
+		core->exclusive_sess = sess;
 	goto unlock_ok;
 
 vififo_free:
+	kfree(sess->priv);
+	sess->priv = NULL;
 	dma_free_coherent(sess->core->dev, sess->vififo_size,
 			  sess->vififo_vaddr, sess->vififo_paddr);
 bufs_done:
@@ -455,20 +546,32 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *buf;
+	bool decoder_active;
 
+	decoder_active = sess->status == STATUS_RUNNING ||
+			 sess->status == STATUS_INIT ||
+			 (sess->status == STATUS_NEEDS_RESUME &&
+			  (!sess->streamon_out || !sess->streamon_cap));
+	if (decoder_active)
+		disable_irq(core->vdec_irq);
 	mutex_lock(&core->hw_lock);
 
-	if (sess->status == STATUS_RUNNING ||
-	    sess->status == STATUS_INIT ||
-	    (sess->status == STATUS_NEEDS_RESUME &&
-	     (!sess->streamon_out || !sess->streamon_cap))) {
+	if (decoder_active) {
 		if (vdec_codec_needs_recycle(sess))
 			kthread_stop(sess->recycle_thread);
 
-		disable_irq(core->vdec_irq);
-		vdec_set_current_session(core, NULL);
-		vdec_poweroff(sess);
-		enable_irq(core->vdec_irq);
+		if (core->cur_sess == sess) {
+			vdec_set_current_session(core, NULL);
+			vdec_poweroff(sess);
+		} else if (codec_ops->release && sess->priv) {
+			codec_ops->release(sess);
+		}
+
+		if (codec_ops->context_switching)
+			core->context_switching_sessions--;
+		else
+			core->exclusive_sess = NULL;
+
 		vdec_free_canvas(sess);
 		dma_free_coherent(sess->core->dev, sess->vififo_size,
 				  sess->vififo_vaddr, sess->vififo_paddr);
@@ -496,6 +599,8 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	}
 
 	mutex_unlock(&core->hw_lock);
+	if (decoder_active)
+		enable_irq(core->vdec_irq);
 }
 
 static int vdec_vb2_buf_prepare(struct vb2_buffer *vb)

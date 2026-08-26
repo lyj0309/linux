@@ -88,13 +88,24 @@ release_firmware:
 static int vdec_1_stbuf_power_up(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
+	u32 curr = sess->vififo_paddr;
+	u32 rp = sess->vififo_paddr;
+	u32 wp = sess->vififo_paddr;
+	u32 wrap_count = 0;
+
+	if (sess->vififo_context_valid) {
+		curr = sess->vififo_curr;
+		wp = sess->vififo_wp;
+		rp = sess->vififo_rp;
+		wrap_count = sess->vififo_wrap_count;
+	}
 
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
-	amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT, 0);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT, wrap_count);
 	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR, sess->vififo_paddr);
-	amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, sess->vififo_paddr);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, curr);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_END_PTR,
 			 sess->vififo_paddr + sess->vififo_size - 8);
 
@@ -102,7 +113,9 @@ static int vdec_1_stbuf_power_up(struct amvdec_session *sess)
 	amvdec_clear_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, 1);
 
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
-	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP, sess->vififo_paddr);
+	if (sess->vififo_context_valid)
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_RP, rp);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP, wp);
 
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_BUF_CNTL, 1);
 	amvdec_clear_dos_bits(core, VLD_MEM_VIFIFO_BUF_CNTL, 1);
@@ -131,10 +144,49 @@ static u32 vdec_1_vififo_level(struct amvdec_session *sess)
 	return amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
 }
 
+static bool vdec_1_stbuf_pointer_valid(struct amvdec_session *sess, u32 ptr)
+{
+	u64 start = sess->vififo_paddr;
+	u64 end = start + sess->vififo_size - 8;
+
+	return ptr >= start && ptr <= end;
+}
+
+static void vdec_1_save_stbuf_context(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	u32 curr, wp, rp;
+
+	curr = amvdec_read_dos(core, VLD_MEM_VIFIFO_CURR_PTR);
+	wp = amvdec_read_dos(core, VLD_MEM_VIFIFO_WP);
+	rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+
+	if (!vdec_1_stbuf_pointer_valid(sess, curr) ||
+	    !vdec_1_stbuf_pointer_valid(sess, wp) ||
+	    !vdec_1_stbuf_pointer_valid(sess, rp)) {
+		dev_warn(core->dev, "invalid VIFIFO context pointers\n");
+		sess->vififo_context_valid = false;
+		return;
+	}
+
+	sess->vififo_curr = curr;
+	sess->vififo_wp = wp;
+	sess->vififo_rp = rp;
+	sess->vififo_wrap_count =
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT);
+	sess->vififo_context_valid = true;
+}
+
 static void __vdec_1_stop(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+
+	if (codec_ops->context_switching)
+		vdec_1_save_stbuf_context(sess);
+
+	if (sess->priv)
+		codec_ops->stop(sess);
 
 	amvdec_write_dos(core, MPSR, 0);
 	amvdec_write_dos(core, CPSR, 0);
@@ -160,8 +212,6 @@ static void __vdec_1_stop(struct amvdec_session *sess)
 		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_SLEEP0,
 				   GEN_PWR_VDEC_1, GEN_PWR_VDEC_1);
 
-	if (sess->priv)
-		codec_ops->stop(sess);
 }
 
 static int vdec_1_stop(struct amvdec_session *sess)

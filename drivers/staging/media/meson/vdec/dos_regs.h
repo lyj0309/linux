@@ -34,6 +34,7 @@
 #define DBLK_STATUS		0x254c
 
 #define GCLK_EN			0x260c
+#define MDEC_PIC_DC_MUX_CTRL	0x2634
 #define MDEC_PIC_DC_CTRL	0x2638
 #define MDEC_PIC_DC_STATUS	0x263c
 #define ANC0_CANVAS_ADDR	0x2640
@@ -62,11 +63,15 @@
 #define AV_SCRATCH_J		0x274c
 #define AV_SCRATCH_K		0x2750
 #define AV_SCRATCH_L		0x2754
+#define MDEC_EXTIF_CFG1		0x2794
 
 #define MPEG1_2_REG		0x3004
 #define PIC_HEAD_INFO		0x300c
 #define POWER_CTL_VLD		0x3020
+#define VLD_DECODE_CONTROL	0x3060
 #define M4_CONTROL_REG		0x30a4
+#define VCOP_CTRL_REG		0x3800
+#define IQIDCT_CONTROL		0x3838
 
 /* Stream Buffer (stbuf) regs */
 #define VLD_MEM_VIFIFO_START_PTR	0x3100
