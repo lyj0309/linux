@@ -311,7 +311,7 @@ EXPORT_SYMBOL_GPL(amvdec_remove_ts);
 
 static void dst_buf_done(struct amvdec_session *sess,
 			 struct vb2_v4l2_buffer *vbuf,
-			 u32 field, u64 timestamp,
+			 u32 field, u32 type, u64 timestamp,
 			 struct v4l2_timecode timecode, u32 flags)
 {
 	struct device *dev = sess->core->dev_dec;
@@ -333,6 +333,13 @@ static void dst_buf_done(struct amvdec_session *sess,
 	vbuf->sequence = sess->sequence_cap++;
 	vbuf->flags = flags;
 	vbuf->timecode = timecode;
+
+	if (type == 1 || type == 4)
+		vbuf->flags |= V4L2_BUF_FLAG_KEYFRAME;
+	else if (type == 2)
+		vbuf->flags |= V4L2_BUF_FLAG_PFRAME;
+	else if (type == 3)
+		vbuf->flags |= V4L2_BUF_FLAG_BFRAME;
 
 	if (sess->should_stop &&
 	    atomic_read(&sess->esparser_queued_bufs) <= 1) {
@@ -359,43 +366,60 @@ static void dst_buf_done(struct amvdec_session *sess,
 	amvdec_m2m_retry_job(sess);
 }
 
-void amvdec_dst_buf_done(struct amvdec_session *sess,
-			 struct vb2_v4l2_buffer *vbuf, u32 field)
+int amvdec_take_ts(struct amvdec_session *sess,
+		   struct amvdec_timestamp_info *timestamp)
 {
-	struct device *dev = sess->core->dev_dec;
 	struct amvdec_timestamp *tmp;
 	struct list_head *timestamps = &sess->timestamps;
-	struct v4l2_timecode timecode;
-	u64 timestamp;
-	u32 vbuf_flags;
 	unsigned long flags;
 
 	spin_lock_irqsave(&sess->ts_spinlock, flags);
 	if (list_empty(timestamps)) {
-		dev_err(dev, "Buffer %u done but list is empty\n",
-			vbuf->vb2_buf.index);
-
-		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
 		spin_unlock_irqrestore(&sess->ts_spinlock, flags);
-		return;
+		return -ENOENT;
 	}
 
 	tmp = list_first_entry(timestamps, struct amvdec_timestamp, list);
-	timestamp = tmp->ts;
-	timecode = tmp->tc;
-	vbuf_flags = tmp->flags;
+	timestamp->timestamp = tmp->ts;
+	timestamp->timecode = tmp->tc;
+	timestamp->flags = tmp->flags;
 	list_del(&tmp->list);
 	kfree(tmp);
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(amvdec_take_ts);
 
-	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
+void amvdec_dst_buf_done_ts(struct amvdec_session *sess,
+			    struct vb2_v4l2_buffer *vbuf, u32 field, u32 type,
+			    const struct amvdec_timestamp_info *timestamp)
+{
+	dst_buf_done(sess, vbuf, field, type, timestamp->timestamp,
+		     timestamp->timecode, timestamp->flags);
 	atomic_dec(&sess->esparser_queued_bufs);
+}
+EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_ts);
+
+void amvdec_dst_buf_done(struct amvdec_session *sess,
+			 struct vb2_v4l2_buffer *vbuf, u32 field, u32 type)
+{
+	struct amvdec_timestamp_info timestamp;
+
+	if (amvdec_take_ts(sess, &timestamp)) {
+		dev_err(sess->core->dev_dec,
+			"Buffer %u done but timestamp list is empty\n",
+			vbuf->vb2_buf.index);
+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		return;
+	}
+
+	amvdec_dst_buf_done_ts(sess, vbuf, field, type, &timestamp);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done);
 
 void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 				struct vb2_v4l2_buffer *vbuf,
-				u32 offset, u32 field, bool allow_drop)
+				u32 offset, u32 field, u32 type, bool allow_drop)
 {
 	struct device *dev = sess->core->dev_dec;
 	struct amvdec_timestamp *match = NULL;
@@ -436,14 +460,14 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 	}
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
 
-	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
+	dst_buf_done(sess, vbuf, field, type, timestamp, timecode, vbuf_flags);
 	if (match)
 		atomic_dec(&sess->esparser_queued_bufs);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_offset);
 
 void amvdec_dst_buf_done_idx(struct amvdec_session *sess,
-			     u32 buf_idx, u32 offset, u32 field)
+			     u32 buf_idx, u32 offset, u32 field, u32 type)
 {
 	struct vb2_v4l2_buffer *vbuf;
 	struct device *dev = sess->core->dev_dec;
@@ -459,9 +483,9 @@ void amvdec_dst_buf_done_idx(struct amvdec_session *sess,
 	}
 
 	if (offset != -1)
-		amvdec_dst_buf_done_offset(sess, vbuf, offset, field, true);
+		amvdec_dst_buf_done_offset(sess, vbuf, offset, field, type, true);
 	else
-		amvdec_dst_buf_done(sess, vbuf, field);
+		amvdec_dst_buf_done(sess, vbuf, field, type);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_idx);
 

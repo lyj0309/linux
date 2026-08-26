@@ -192,6 +192,7 @@ static void h264_multi_dpb_decode_ref(struct kunit *test,
 						   &poc), 0);
 	KUNIT_ASSERT_EQ(test, h264_multi_dpb_finish(dpb, config, &picture,
 						    marking, &poc,
+						     reference_ts,
 						     reference_ts), 0);
 }
 
@@ -334,10 +335,12 @@ static void h264_multi_dpb_multislice_picture_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h264_multi_dpb_active_slots(&dpb), 0U);
 
 	ret = h264_multi_dpb_picture_finish(&dpb, &config, &pic_state, &marking,
-					    103);
+					    103, 7);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_FALSE(test, pic_state.active);
 	KUNIT_EXPECT_NOT_NULL(test, h264_multi_dpb_find_ts(&dpb, 103));
+	KUNIT_EXPECT_EQ(test, h264_multi_dpb_find_ts(&dpb, 103)->buffer_index,
+			7U);
 }
 
 static void h264_multi_dpb_picture_sequence_error_test(struct kunit *test)

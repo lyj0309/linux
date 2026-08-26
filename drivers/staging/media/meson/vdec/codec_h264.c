@@ -413,7 +413,7 @@ static void codec_h264_frames_ready(struct amvdec_session *sess, u32 status)
 			field = V4L2_FIELD_INTERLACED_BT;
 
 		offset |= get_offset_msb(core, i);
-		amvdec_dst_buf_done_idx(sess, buffer_index, offset, field);
+		amvdec_dst_buf_done_idx(sess, buffer_index, offset, field, 0);
 	}
 }
 
