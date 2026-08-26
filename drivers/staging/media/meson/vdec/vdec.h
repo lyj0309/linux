@@ -60,6 +60,12 @@ enum amvdec_irq {
 	AMVDEC_NUM_IRQS,
 };
 
+enum amvdec_hw {
+	AMVDEC_HW_VDEC_1,
+	AMVDEC_HW_VDEC_HEVC,
+	AMVDEC_NUM_HW,
+};
+
 /**
  * struct amvdec_core - device parameters, singleton
  *
@@ -82,7 +88,7 @@ enum amvdec_irq {
  * @esparser_wq: wait queue for parser fetch completion
  * @esparser_search_done: parser fetch completion flag
  * @cur_sess: session currently receiving decoder interrupts
- * @hw_sess: session whose decoder hardware is powered
+ * @hw_sess: session retained on each decoder hardware block
  * @exclusive_sess: streaming session for a codec that cannot context switch
  * @context_switching_sessions: number of streaming switchable sessions
  * @lock: video device lock
@@ -117,7 +123,7 @@ struct amvdec_core {
 	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
-	struct amvdec_session *hw_sess;
+	struct amvdec_session *hw_sess[AMVDEC_NUM_HW];
 	struct amvdec_session *exclusive_sess;
 	unsigned int context_switching_sessions;
 	struct mutex lock;
@@ -131,8 +137,11 @@ struct amvdec_core {
  *
  * @start: mandatory call when the vdec needs to initialize
  * @stop: mandatory call when the vdec needs to stop
- * @resume: optional call to restore a switchable hardware context
+ * @stop_suspended: optional call to power off an already suspended vdec
+ * @resume: optional call to restore a switchable hardware context, reloading
+ * firmware when requested
  * @suspend: optional call to save a switchable hardware context
+ * @hw: decoder hardware block used by these operations
  * @conf_esparser: mandatory call to let the vdec configure the ESPARSER
  * @vififo_level: mandatory call to get the current amount of data
  *		  in the VIFIFO
@@ -140,8 +149,10 @@ struct amvdec_core {
 struct amvdec_ops {
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
-	int (*resume)(struct amvdec_session *sess);
+	int (*stop_suspended)(struct amvdec_session *sess);
+	int (*resume)(struct amvdec_session *sess, bool reload_firmware);
 	void (*suspend)(struct amvdec_session *sess);
+	enum amvdec_hw hw;
 	void (*conf_esparser)(struct amvdec_session *sess);
 	u32 (*vififo_level)(struct amvdec_session *sess);
 };

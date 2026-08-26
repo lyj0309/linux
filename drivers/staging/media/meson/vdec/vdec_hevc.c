@@ -31,7 +31,7 @@
 				 BIT(24) | BIT(26))
 
 static int vdec_hevc_load_firmware(struct amvdec_session *sess,
-				   const char *fwname)
+				   const char *fwname, bool load_hardware)
 {
 	struct amvdec_core *core = sess->core;
 	struct device *dev = core->dev_dec;
@@ -39,8 +39,13 @@ static int vdec_hevc_load_firmware(struct amvdec_session *sess,
 	const struct firmware *fw;
 	dma_addr_t mc_addr_map;
 	void *mc_addr;
+	bool prepare_context;
 	int ret;
 	u32 val;
+
+	prepare_context = codec_ops->prepare_firmware && !sess->priv;
+	if (!load_hardware && !prepare_context)
+		return 0;
 
 	ret = request_firmware(&fw, fwname, dev);
 	if (ret < 0)  {
@@ -55,30 +60,39 @@ static int vdec_hevc_load_firmware(struct amvdec_session *sess,
 		goto release_firmware;
 	}
 
-	mc_addr = dma_alloc_coherent(core->dev, MC_SIZE, &mc_addr_map,
-				     GFP_KERNEL);
-	if (!mc_addr) {
-		ret = -ENOMEM;
-		goto release_firmware;
+	if (load_hardware) {
+		mc_addr = dma_alloc_coherent(core->dev, MC_SIZE, &mc_addr_map,
+					     GFP_KERNEL);
+		if (!mc_addr) {
+			ret = -ENOMEM;
+			goto release_firmware;
+		}
+
+		memcpy(mc_addr, fw->data, MC_SIZE);
+
+		amvdec_write_dos(core, HEVC_MPSR, 0);
+		amvdec_write_dos(core, HEVC_CPSR, 0);
+		amvdec_read_dos(core, HEVC_MPSR);
+		amvdec_read_dos(core, HEVC_MPSR);
+
+		amvdec_write_dos(core, HEVC_IMEM_DMA_ADR, mc_addr_map);
+		amvdec_write_dos(core, HEVC_IMEM_DMA_COUNT, MC_SIZE / 4);
+		amvdec_write_dos(core, HEVC_IMEM_DMA_CTRL,
+				 (0x8000 | (7 << 16)));
+
+		ret = readl_poll_timeout(core->dos_base + HEVC_IMEM_DMA_CTRL,
+					 val, !(val & BIT(15)), 10,
+					 USEC_PER_SEC);
+		if (ret)
+			dev_err(dev, "Firmware load fail (DMA hang?)\n");
+		dma_free_coherent(core->dev, MC_SIZE, mc_addr, mc_addr_map);
+		if (ret)
+			goto release_firmware;
 	}
 
-	memcpy(mc_addr, fw->data, MC_SIZE);
-
-	amvdec_write_dos(core, HEVC_MPSR, 0);
-	amvdec_write_dos(core, HEVC_CPSR, 0);
-
-	amvdec_write_dos(core, HEVC_IMEM_DMA_ADR, mc_addr_map);
-	amvdec_write_dos(core, HEVC_IMEM_DMA_COUNT, MC_SIZE / 4);
-	amvdec_write_dos(core, HEVC_IMEM_DMA_CTRL, (0x8000 | (7 << 16)));
-
-	ret = readl_poll_timeout(core->dos_base + HEVC_IMEM_DMA_CTRL, val,
-				 !(val & BIT(15)), 10, USEC_PER_SEC);
-	if (ret)
-		dev_err(dev, "Firmware load fail (DMA hang?)\n");
-	else if (codec_ops->prepare_firmware)
+	if (prepare_context)
 		ret = codec_ops->prepare_firmware(sess, fw->data, fw->size);
 
-	dma_free_coherent(core->dev, MC_SIZE, mc_addr, mc_addr_map);
 release_firmware:
 	release_firmware(fw);
 	return ret;
@@ -160,35 +174,41 @@ static void vdec_hevc_power_off(struct amvdec_session *sess)
 				   GEN_PWR_VDEC_HEVC, GEN_PWR_VDEC_HEVC);
 }
 
-static int vdec_hevc_stop(struct amvdec_session *sess)
+static int vdec_hevc_stop_suspended(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 
-	vdec_hevc_suspend(sess);
 	vdec_hevc_power_off(sess);
 
 	clk_disable_unprepare(core->vdec_hevc_clk);
-	if (core->platform->revision == VDEC_REVISION_G12A ||
-	    core->platform->revision == VDEC_REVISION_SM1)
+	if (core->platform->revision >= VDEC_REVISION_G12A)
 		clk_disable_unprepare(core->vdec_hevcf_clk);
 
 	return 0;
 }
 
-static int vdec_hevc_resume(struct amvdec_session *sess)
+static int vdec_hevc_stop(struct amvdec_session *sess)
+{
+	vdec_hevc_suspend(sess);
+	return vdec_hevc_stop_suspended(sess);
+}
+
+static int vdec_hevc_init(struct amvdec_session *sess, bool load_firmware)
 {
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	int ret;
 
-	/* Reset the same HEVC domains as the vendor frame-based decoder. */
-	amvdec_write_dos(core, DOS_SW_RESET3, VDEC_HEVC_RESET_MASK);
+	/* A powered-off block also needs its firmware DMA state reset. */
+	amvdec_write_dos(core, DOS_SW_RESET3,
+			 load_firmware ? 0xffffffff : VDEC_HEVC_RESET_MASK);
 	amvdec_write_dos(core, DOS_SW_RESET3, 0);
 	amvdec_write_dos(core, DOS_GCLK_EN3, 0xffffffff);
 
 	vdec_hevc_stbuf_init(sess);
 
-	ret = vdec_hevc_load_firmware(sess, sess->fmt_out->firmware_path);
+	ret = vdec_hevc_load_firmware(sess, sess->fmt_out->firmware_path,
+				      load_firmware);
 	if (ret)
 		goto stop;
 
@@ -210,6 +230,12 @@ static int vdec_hevc_resume(struct amvdec_session *sess)
 stop:
 	vdec_hevc_suspend(sess);
 	return ret;
+}
+
+static int vdec_hevc_resume(struct amvdec_session *sess,
+			    bool reload_firmware)
+{
+	return vdec_hevc_init(sess, reload_firmware);
 }
 
 static int __vdec_hevc_start(struct amvdec_session *sess)
@@ -244,7 +270,7 @@ static int __vdec_hevc_start(struct amvdec_session *sess)
 		regmap_update_bits(core->regmap_ao, AO_RTI_GEN_PWR_ISO0,
 				   0xc00, 0);
 
-	ret = vdec_hevc_resume(sess);
+	ret = vdec_hevc_init(sess, true);
 	if (!ret)
 		return 0;
 
@@ -258,8 +284,7 @@ static int vdec_hevc_start(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	int ret;
 
-	if (core->platform->revision == VDEC_REVISION_G12A ||
-	    core->platform->revision == VDEC_REVISION_SM1) {
+	if (core->platform->revision >= VDEC_REVISION_G12A) {
 		clk_set_rate(core->vdec_hevcf_clk, 666666666);
 		ret = clk_prepare_enable(core->vdec_hevcf_clk);
 		if (ret)
@@ -277,6 +302,10 @@ static int vdec_hevc_start(struct amvdec_session *sess)
 struct amvdec_ops vdec_hevc_ops = {
 	.start = vdec_hevc_start,
 	.stop = vdec_hevc_stop,
+	.stop_suspended = vdec_hevc_stop_suspended,
+	.resume = vdec_hevc_resume,
+	.suspend = vdec_hevc_suspend,
+	.hw = AMVDEC_HW_VDEC_HEVC,
 	.conf_esparser = vdec_hevc_conf_esparser,
 	.vififo_level = vdec_hevc_vififo_level,
 };
