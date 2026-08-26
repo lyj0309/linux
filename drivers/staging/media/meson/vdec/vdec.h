@@ -81,7 +81,8 @@ enum amvdec_irq {
  * @m2m_dev: device-level v4l2 memory-to-memory scheduler
  * @esparser_wq: wait queue for parser fetch completion
  * @esparser_search_done: parser fetch completion flag
- * @cur_sess: current decoding session
+ * @cur_sess: session currently receiving decoder interrupts
+ * @hw_sess: session whose decoder hardware is powered
  * @exclusive_sess: streaming session for a codec that cannot context switch
  * @context_switching_sessions: number of streaming switchable sessions
  * @lock: video device lock
@@ -116,6 +117,7 @@ struct amvdec_core {
 	bool esparser_search_done;
 
 	struct amvdec_session *cur_sess;
+	struct amvdec_session *hw_sess;
 	struct amvdec_session *exclusive_sess;
 	unsigned int context_switching_sessions;
 	struct mutex lock;
@@ -129,6 +131,8 @@ struct amvdec_core {
  *
  * @start: mandatory call when the vdec needs to initialize
  * @stop: mandatory call when the vdec needs to stop
+ * @resume: optional call to restore a switchable hardware context
+ * @suspend: optional call to save a switchable hardware context
  * @conf_esparser: mandatory call to let the vdec configure the ESPARSER
  * @vififo_level: mandatory call to get the current amount of data
  *		  in the VIFIFO
@@ -136,6 +140,8 @@ struct amvdec_core {
 struct amvdec_ops {
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
+	int (*resume)(struct amvdec_session *sess);
+	void (*suspend)(struct amvdec_session *sess);
 	void (*conf_esparser)(struct amvdec_session *sess);
 	u32 (*vififo_level)(struct amvdec_session *sess);
 };
@@ -158,6 +164,8 @@ struct amvdec_ops {
  *		     a new OUTPUT buffer
  * @job_ready: optional call to check whether a pending codec job can run
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
+ * @hold_capture_buf: optional call to hold a returned capture buffer while it
+ *		     remains referenced by the decoder
  * @can_recycle: optional call to know if the codec is ready to recycle
  *		 a dst buffer
  * @recycle: optional call to tell the codec to recycle a dst buffer. Must go
@@ -186,6 +194,8 @@ struct amvdec_codec_ops {
 	bool (*has_pending_job)(struct amvdec_session *sess);
 	bool (*job_ready)(struct amvdec_session *sess);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
+	bool (*hold_capture_buf)(struct amvdec_session *sess,
+				 struct vb2_v4l2_buffer *vbuf);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
