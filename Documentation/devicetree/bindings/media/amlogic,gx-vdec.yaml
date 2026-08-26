@@ -22,8 +22,8 @@ description: |
   - VDEC_1 can decode MPEG-1, MPEG-2, MPEG-4 part 2, MJPEG, H.263, H.264, VC-1.
   - VDEC_HEVC can decode HEVC and VP9.
 
-  Both VDEC_1 and VDEC_HEVC share the "vdec" IRQ and as such cannot run
-  concurrently.
+  Legacy firmware uses the shared "vdec" IRQ. Multi-instance firmware on G12
+  and newer SoCs uses the decoder mailbox IRQs independently.
 
 properties:
   compatible:
@@ -38,14 +38,29 @@ properties:
       - enum:
           - amlogic,g12a-vdec # G12A (S905X2, S905D2)
           - amlogic,sm1-vdec # SM1 (S905X3, S905D3)
+      - items:
+          - const: amlogic,g12b-vdec # G12B (A311D, S922X)
+          - const: amlogic,g12a-vdec
 
   interrupts:
     minItems: 2
+    maxItems: 4
 
   interrupt-names:
-    items:
-      - const: vdec
-      - const: esparser
+    oneOf:
+      - items:
+          - const: vdec
+          - const: esparser
+      - items:
+          - const: esparser
+          - const: mbox0
+          - const: mbox1
+          - const: mbox2
+      - items:
+          - const: esparser
+          - const: mbox0
+          - const: vdec
+          - const: mbox2
 
   reg:
     minItems: 2
@@ -102,6 +117,7 @@ allOf:
           contains:
             enum:
               - amlogic,g12a-vdec
+              - amlogic,g12b-vdec
               - amlogic,sm1-vdec
 
     then:
